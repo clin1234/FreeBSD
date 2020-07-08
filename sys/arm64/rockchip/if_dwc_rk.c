@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2018 Emmanuel Vadot <manu@freebsd.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -58,12 +57,21 @@ __FBSDID("$FreeBSD$");
 #define	 RK3328_GRF_MAC_CON0_RX_SHIFT	7
 
 #define	RK3328_GRF_MAC_CON1		0x0904
+#define	 RK3328_GRF_MAC_CON1_RX_ENA	(1 << 1)
+#define	 RK3328_GRF_MAC_CON1_TX_ENA	(1 << 0)
 #define	RK3328_GRF_MAC_CON2		0x0908
 #define	RK3328_GRF_MACPHY_CON0		0x0B00
 #define	RK3328_GRF_MACPHY_CON1		0x0B04
 #define	RK3328_GRF_MACPHY_CON2		0x0B08
 #define	RK3328_GRF_MACPHY_CON3		0x0B0C
 #define	RK3328_GRF_MACPHY_STATUS	0x0B10
+
+static struct ofw_compat_data compat_data[] = {
+	{"rockchip,rk3288-gmac", 1},
+	{"rockchip,rk3328-gmac", 1},
+	{"rockchip,rk3399-gmac", 1},
+	{NULL,			 0}
+};
 
 static void
 rk3328_set_delays(struct syscon *grf, phandle_t node)
@@ -75,18 +83,24 @@ rk3328_set_delays(struct syscon *grf, phandle_t node)
 	if (OF_getencprop(node, "rx_delay", &rx, sizeof(rx)) <= 0)
 		rx = 0x10;
 
+	if (bootverbose)
+		printf("setting RK3328 RX/TX delays:  %d/%d\n", rx, tx);
 	tx = ((tx & RK3328_GRF_MAC_CON0_TX_MASK) <<
 	    RK3328_GRF_MAC_CON0_TX_SHIFT);
 	rx = ((rx & RK3328_GRF_MAC_CON0_TX_MASK) <<
 	    RK3328_GRF_MAC_CON0_RX_SHIFT);
 
 	SYSCON_WRITE_4(grf, RK3328_GRF_MAC_CON0, tx | rx | 0xFFFF0000);
+	SYSCON_WRITE_4(grf, RK3328_GRF_MAC_CON1, RK3328_GRF_MAC_CON1_TX_ENA | RK3328_GRF_MAC_CON1_RX_ENA | 
+	    ((RK3328_GRF_MAC_CON1_TX_ENA | RK3328_GRF_MAC_CON1_RX_ENA) << 16));
 }
 
 #define	RK3399_GRF_SOC_CON6		0xc218
+#define	 RK3399_GRF_SOC_CON6_TX_ENA	(1 << 7)
 #define	 RK3399_GRF_SOC_CON6_TX_MASK	0x7F
 #define	 RK3399_GRF_SOC_CON6_TX_SHIFT	0
 #define	 RK3399_GRF_SOC_CON6_RX_MASK	0x7F
+#define	 RK3399_GRF_SOC_CON6_RX_ENA	(1 << 15)
 #define	 RK3399_GRF_SOC_CON6_RX_SHIFT	8
 
 static void
@@ -99,10 +113,12 @@ rk3399_set_delays(struct syscon *grf, phandle_t node)
 	if (OF_getencprop(node, "rx_delay", &rx, sizeof(rx)) <= 0)
 		rx = 0x10;
 
+	if (bootverbose)
+		printf("setting RK3399 RX/TX delays:  %d/%d\n", rx, tx);
 	tx = ((tx & RK3399_GRF_SOC_CON6_TX_MASK) <<
-	    RK3399_GRF_SOC_CON6_TX_SHIFT);
+	    RK3399_GRF_SOC_CON6_TX_SHIFT) | RK3399_GRF_SOC_CON6_TX_ENA;
 	rx = ((rx & RK3399_GRF_SOC_CON6_TX_MASK) <<
-	    RK3399_GRF_SOC_CON6_RX_SHIFT);
+	    RK3399_GRF_SOC_CON6_RX_SHIFT) | RK3399_GRF_SOC_CON6_RX_ENA;
 
 	SYSCON_WRITE_4(grf, RK3399_GRF_SOC_CON6, tx | rx | 0xFFFF0000);
 }
@@ -113,8 +129,7 @@ if_dwc_rk_probe(device_t dev)
 
 	if (!ofw_bus_status_okay(dev))
 		return (ENXIO);
-	if (!(ofw_bus_is_compatible(dev, "rockchip,rk3328-gmac") ||
-	      ofw_bus_is_compatible(dev, "rockchip,rk3399-gmac")))
+	if (ofw_bus_search_compatible(dev, compat_data)->ocd_data == 0)
 		return (ENXIO);
 	device_set_desc(dev, "Rockchip Gigabit Ethernet Controller");
 
@@ -135,12 +150,10 @@ if_dwc_rk_init(device_t dev)
 		return (ENXIO);
 	}
 
-#ifdef notyet
 	if (ofw_bus_is_compatible(dev, "rockchip,rk3399-gmac"))
 	    rk3399_set_delays(grf, node);
 	else if (ofw_bus_is_compatible(dev, "rockchip,rk3328-gmac"))
 	    rk3328_set_delays(grf, node);
-#endif
 
 	/* Mode should be set according to dtb property */
 
@@ -151,7 +164,7 @@ static int
 if_dwc_rk_mac_type(device_t dev)
 {
 
-	return (DWC_GMAC_ALT_DESC);
+	return (DWC_GMAC_NORMAL_DESC);
 }
 
 static int

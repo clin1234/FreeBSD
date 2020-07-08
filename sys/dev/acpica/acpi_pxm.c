@@ -628,7 +628,8 @@ srat_walk_table(acpi_subtable_handler *handler, void *arg)
 }
 
 /*
- * Setup per-CPU domain IDs from information saved in 'cpus'.
+ * Set up per-CPU domain IDs from information saved in 'cpus' and tear down data
+ * structures allocated by acpi_pxm_init().
  */
 void
 acpi_pxm_set_cpu_locality(void)
@@ -651,20 +652,21 @@ acpi_pxm_set_cpu_locality(void)
 			printf("SRAT: CPU %u has memory domain %d\n", i,
 			    pc->pc_domain);
 	}
-}
-
-/*
- * Free data structures allocated during acpi_pxm_init.
- */
-void
-acpi_pxm_free(void)
-{
-
-	if (srat_physaddr == 0)
-		return;
+	/* XXXMJ the page is leaked. */
 	pmap_unmapbios((vm_offset_t)cpus, sizeof(*cpus) * max_cpus);
 	srat_physaddr = 0;
 	cpus = NULL;
+}
+
+int
+acpi_pxm_get_cpu_locality(int apic_id)
+{
+	struct cpu_info *cpu;
+
+	cpu = cpu_find(apic_id);
+	if (cpu == NULL)
+		panic("SRAT: CPU with ID %u is not known", apic_id);
+	return (cpu->domain);
 }
 
 /*

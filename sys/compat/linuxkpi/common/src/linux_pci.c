@@ -29,15 +29,16 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/bus.h>
 #include <sys/malloc.h>
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
-#include <sys/bus.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/filio.h>
+#include <sys/pciio.h>
 #include <sys/pctrie.h>
 #include <sys/rwlock.h>
 
@@ -45,6 +46,10 @@ __FBSDID("$FreeBSD$");
 #include <vm/pmap.h>
 
 #include <machine/stdarg.h>
+
+#include <dev/pci/pcivar.h>
+#include <dev/pci/pci_private.h>
+#include <dev/pci/pci_iov.h>
 
 #include <linux/kobject.h>
 #include <linux/device.h>
@@ -65,6 +70,9 @@ static device_detach_t linux_pci_detach;
 static device_suspend_t linux_pci_suspend;
 static device_resume_t linux_pci_resume;
 static device_shutdown_t linux_pci_shutdown;
+static pci_iov_init_t linux_pci_iov_init;
+static pci_iov_uninit_t linux_pci_iov_uninit;
+static pci_iov_add_vf_t linux_pci_iov_add_vf;
 
 static device_method_t pci_methods[] = {
 	DEVMETHOD(device_probe, linux_pci_probe),
@@ -73,6 +81,9 @@ static device_method_t pci_methods[] = {
 	DEVMETHOD(device_suspend, linux_pci_suspend),
 	DEVMETHOD(device_resume, linux_pci_resume),
 	DEVMETHOD(device_shutdown, linux_pci_shutdown),
+	DEVMETHOD(pci_iov_init, linux_pci_iov_init),
+	DEVMETHOD(pci_iov_uninit, linux_pci_iov_uninit),
+	DEVMETHOD(pci_iov_add_vf, linux_pci_iov_add_vf),
 	DEVMETHOD_END
 };
 
@@ -202,24 +213,33 @@ linux_pci_probe(device_t dev)
 static int
 linux_pci_attach(device_t dev)
 {
-	struct resource_list_entry *rle;
-	struct pci_bus *pbus;
-	struct pci_dev *pdev;
-	struct pci_devinfo *dinfo;
-	struct pci_driver *pdrv;
 	const struct pci_device_id *id;
-	device_t parent;
-	devclass_t devclass;
-	int error;
-
-	linux_set_current(curthread);
+	struct pci_driver *pdrv;
+	struct pci_dev *pdev;
 
 	pdrv = linux_pci_find(dev, &id);
 	pdev = device_get_softc(dev);
 
-	parent = device_get_parent(dev);
-	devclass = device_get_devclass(parent);
-	if (pdrv->isdrm) {
+	MPASS(pdrv != NULL);
+	MPASS(pdev != NULL);
+
+	return (linux_pci_attach_device(dev, pdrv, id, pdev));
+}
+
+int
+linux_pci_attach_device(device_t dev, struct pci_driver *pdrv,
+    const struct pci_device_id *id, struct pci_dev *pdev)
+{
+	struct resource_list_entry *rle;
+	struct pci_bus *pbus;
+	struct pci_devinfo *dinfo;
+	device_t parent;
+	int error;
+
+	linux_set_current(curthread);
+
+	if (pdrv != NULL && pdrv->isdrm) {
+		parent = device_get_parent(dev);
 		dinfo = device_get_ivars(parent);
 		device_set_ivars(dev, dinfo);
 	} else {
@@ -251,18 +271,22 @@ linux_pci_attach(device_t dev)
 	if (error)
 		goto out_dma_init;
 
+	TAILQ_INIT(&pdev->mmio);
 	pbus = malloc(sizeof(*pbus), M_DEVBUF, M_WAITOK | M_ZERO);
 	pbus->self = pdev;
 	pbus->number = pci_get_bus(dev);
+	pbus->domain = pci_get_domain(dev);
 	pdev->bus = pbus;
 
 	spin_lock(&pci_lock);
 	list_add(&pdev->links, &pci_devices);
 	spin_unlock(&pci_lock);
 
-	error = pdrv->probe(pdev, id);
-	if (error)
-		goto out_probe;
+	if (pdrv != NULL) {
+		error = pdrv->probe(pdev, id);
+		if (error)
+			goto out_probe;
+	}
 	return (0);
 
 out_probe:
@@ -281,10 +305,23 @@ linux_pci_detach(device_t dev)
 {
 	struct pci_dev *pdev;
 
-	linux_set_current(curthread);
 	pdev = device_get_softc(dev);
 
-	pdev->pdrv->remove(pdev);
+	MPASS(pdev != NULL);
+
+	device_set_desc(dev, NULL);
+
+	return (linux_pci_detach_device(pdev));
+}
+
+int
+linux_pci_detach_device(struct pci_dev *pdev)
+{
+
+	linux_set_current(curthread);
+
+	if (pdev->pdrv != NULL)
+		pdev->pdrv->remove(pdev);
 
 	free(pdev->bus, M_DEVBUF);
 	linux_pdev_dma_uninit(pdev);
@@ -292,7 +329,6 @@ linux_pci_detach(device_t dev)
 	spin_lock(&pci_lock);
 	list_del(&pdev->links);
 	spin_unlock(&pci_lock);
-	device_set_desc(dev, NULL);
 	put_device(&pdev->dev);
 
 	return (0);
@@ -357,6 +393,47 @@ linux_pci_shutdown(device_t dev)
 }
 
 static int
+linux_pci_iov_init(device_t dev, uint16_t num_vfs, const nvlist_t *pf_config)
+{
+	struct pci_dev *pdev;
+	int error;
+
+	linux_set_current(curthread);
+	pdev = device_get_softc(dev);
+	if (pdev->pdrv->bsd_iov_init != NULL)
+		error = pdev->pdrv->bsd_iov_init(dev, num_vfs, pf_config);
+	else
+		error = EINVAL;
+	return (error);
+}
+
+static void
+linux_pci_iov_uninit(device_t dev)
+{
+	struct pci_dev *pdev;
+
+	linux_set_current(curthread);
+	pdev = device_get_softc(dev);
+	if (pdev->pdrv->bsd_iov_uninit != NULL)
+		pdev->pdrv->bsd_iov_uninit(dev);
+}
+
+static int
+linux_pci_iov_add_vf(device_t dev, uint16_t vfnum, const nvlist_t *vf_config)
+{
+	struct pci_dev *pdev;
+	int error;
+
+	linux_set_current(curthread);
+	pdev = device_get_softc(dev);
+	if (pdev->pdrv->bsd_iov_add_vf != NULL)
+		error = pdev->pdrv->bsd_iov_add_vf(dev, vfnum, vf_config);
+	else
+		error = EINVAL;
+	return (error);
+}
+
+static int
 _linux_pci_register_driver(struct pci_driver *pdrv, devclass_t dc)
 {
 	int error;
@@ -386,6 +463,36 @@ linux_pci_register_driver(struct pci_driver *pdrv)
 		return (-ENXIO);
 	pdrv->isdrm = false;
 	return (_linux_pci_register_driver(pdrv, dc));
+}
+
+unsigned long
+pci_resource_start(struct pci_dev *pdev, int bar)
+{
+	struct resource_list_entry *rle;
+	rman_res_t newstart;
+	device_t dev;
+
+	if ((rle = linux_pci_get_bar(pdev, bar)) == NULL)
+		return (0);
+	dev = pci_find_dbsf(pdev->bus->domain, pdev->bus->number,
+	    PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+	MPASS(dev != NULL);
+	if (BUS_TRANSLATE_RESOURCE(dev, rle->type, rle->start, &newstart)) {
+		device_printf(pdev->dev.bsddev, "translate of %#jx failed\n",
+		    (uintmax_t)rle->start);
+		return (0);
+	}
+	return (newstart);
+}
+
+unsigned long
+pci_resource_len(struct pci_dev *pdev, int bar)
+{
+	struct resource_list_entry *rle;
+
+	if ((rle = linux_pci_get_bar(pdev, bar)) == NULL)
+		return (0);
+	return (rle->count);
 }
 
 int
@@ -471,7 +578,7 @@ static void *
 linux_dma_trie_alloc(struct pctrie *ptree)
 {
 
-	return (uma_zalloc(linux_dma_trie_zone, 0));
+	return (uma_zalloc(linux_dma_trie_zone, M_NOWAIT));
 }
 
 static void
@@ -540,7 +647,10 @@ linux_dma_map_phys(struct device *dev, vm_paddr_t phys, size_t len)
 	if (bus_dma_id_mapped(priv->dmat, phys, len))
 		return (phys);
 
-	obj = uma_zalloc(linux_dma_obj_zone, 0);
+	obj = uma_zalloc(linux_dma_obj_zone, M_NOWAIT);
+	if (obj == NULL) {
+		return (0);
+	}
 
 	DMA_PRIV_LOCK(priv);
 	if (bus_dmamap_create(priv->dmat, 0, &obj->dmamap) != 0) {

@@ -28,16 +28,22 @@ FDTSRC=		${BOOTSRC}/fdt
 FICLSRC=	${BOOTSRC}/ficl
 LDRSRC=		${BOOTSRC}/common
 LIBLUASRC=	${BOOTSRC}/liblua
+LIBOFWSRC=	${BOOTSRC}/libofw
 LUASRC=		${SRCTOP}/contrib/lua/src
 SASRC=		${BOOTSRC}/libsa
 SYSDIR=		${SRCTOP}/sys
 UBOOTSRC=	${BOOTSRC}/uboot
 ZFSSRC=		${SASRC}/zfs
+LIBCSRC=	${SRCTOP}/lib/libc
 
 BOOTOBJ=	${OBJTOP}/stand
 
 # BINDIR is where we install
 BINDIR?=	/boot
+
+# LUAPATH is where we search for and install lua scripts.
+LUAPATH?=	/boot/lua
+FLUASRC?=	${SRCTOP}/libexec/flua
 
 LIBSA=		${BOOTOBJ}/libsa/libsa.a
 .if ${MACHINE} == "i386"
@@ -64,6 +70,7 @@ CFLAGS+=	-Ddouble=jagged-little-pill -Dfloat=floaty-mcfloatface
 # Experience has shown that problems arise between ~520k to ~530k.
 CFLAGS.clang+=	-Oz
 CFLAGS.gcc+=	-Os
+CFLAGS+=	-ffunction-sections -fdata-sections
 .endif
 
 # GELI Support, with backward compat hooks (mostly)
@@ -108,13 +115,14 @@ AFLAGS+=	--32
 SSP_CFLAGS=
 
 # Add in the no float / no SIMD stuff and announce we're freestanding
-# aarch64 and riscv don't have -msoft-float, but all others do. riscv
-# currently has no /boot/loader, but may soon.
+# aarch64 and riscv don't have -msoft-float, but all others do.
 CFLAGS+=	-ffreestanding ${CFLAGS_NO_SIMD}
 .if ${MACHINE_CPUARCH} == "aarch64"
-CFLAGS+=	-mgeneral-regs-only -fPIC
+CFLAGS+=	-mgeneral-regs-only -ffixed-x18 -fPIC
 .elif ${MACHINE_CPUARCH} == "riscv"
-CFLAGS+=	-march=rv64imac -mabi=lp64
+CFLAGS+=	-march=rv64imac -mabi=lp64 -fPIC
+CFLAGS.clang+=	-mcmodel=medium
+CFLAGS.gcc+=	-mcmodel=medany
 .else
 CFLAGS+=	-msoft-float
 .endif
@@ -136,13 +144,15 @@ CFLAGS+=	-fPIC -mno-red-zone
 # Do not generate movt/movw, because the relocation fixup for them does not
 # translate to the -Bsymbolic -pie format required by self_reloc() in loader(8).
 # Also, the fpu is not available in a standalone environment.
-.if ${COMPILER_VERSION} < 30800
-CFLAGS.clang+=	-mllvm -arm-use-movt=0
-.else
 CFLAGS.clang+=	-mno-movt
-.endif
 CFLAGS.clang+=  -mfpu=none
 CFLAGS+=	-fPIC
+.endif
+
+# Some RISC-V linkers have support for relaxations, while some (lld) do not
+# yet. If this is the case we inhibit the compiler from emitting relaxations.
+.if ${MACHINE_CPUARCH} == "riscv" && ${LINKER_FEATURES:Mriscv-relaxations} == ""
+CFLAGS+=	-mno-relax
 .endif
 
 # The boot loader build uses dd status=none, where possible, for reproducible
@@ -179,15 +189,23 @@ CFLAGS+=-I.
 
 all: ${PROG}
 
+CLEANFILES+= teken_state.h
+teken.c: teken_state.h
+
+teken_state.h: ${SYSDIR}/teken/sequences
+	awk -f ${SYSDIR}/teken/gensequences \
+		${SYSDIR}/teken/sequences > teken_state.h
+
 .if !defined(NO_OBJ)
-_ILINKS=machine
+_ILINKS=include/machine
 .if ${MACHINE} != ${MACHINE_CPUARCH} && ${MACHINE} != "arm64"
-_ILINKS+=${MACHINE_CPUARCH}
+_ILINKS+=include/${MACHINE_CPUARCH}
 .endif
 .if ${MACHINE_CPUARCH} == "i386" || ${MACHINE_CPUARCH} == "amd64"
-_ILINKS+=x86
+_ILINKS+=include/x86
 .endif
-CLEANFILES+=${_ILINKS}
+CFLAGS+= -Iinclude
+CLEANDIRS+= include
 
 beforedepend: ${_ILINKS}
 beforebuild: ${_ILINKS}
@@ -202,8 +220,8 @@ ${OBJS}:       ${_link}
 
 .NOPATH: ${_ILINKS}
 
-${_ILINKS}:
-	@case ${.TARGET} in \
+${_ILINKS}: .NOMETA
+	@case ${.TARGET:T} in \
 	machine) \
 		if [ ${DO32:U0} -eq 0 ]; then \
 			path=${SYSDIR}/${MACHINE}/include ; \
@@ -213,8 +231,11 @@ ${_ILINKS}:
 	*) \
 		path=${SYSDIR}/${.TARGET:T}/include ;; \
 	esac ; \
+	case ${.TARGET} in \
+	*/*) mkdir -p ${.TARGET:H};; \
+	esac ; \
 	path=`(cd $$path && /bin/pwd)` ; \
-	${ECHO} ${.TARGET:T} "->" $$path ; \
-	ln -fhs $$path ${.TARGET:T}
+	${ECHO} ${.TARGET} "->" $$path ; \
+	ln -fhs $$path ${.TARGET}
 .endif # !NO_OBJ
 .endif # __BOOT_DEFS_MK__

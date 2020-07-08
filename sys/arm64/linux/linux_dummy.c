@@ -64,8 +64,6 @@ UNIMPLEMENTED(tuxcall);
 UNIMPLEMENTED(uselib);
 UNIMPLEMENTED(vserver);
 
-DUMMY(sendfile);
-DUMMY(syslog);
 DUMMY(setfsuid);
 DUMMY(setfsgid);
 DUMMY(vhangup);
@@ -102,7 +100,6 @@ DUMMY(unshare);
 /* Linux 2.6.17: */
 DUMMY(splice);
 DUMMY(tee);
-DUMMY(sync_file_range);
 DUMMY(vmsplice);
 /* Linux 2.6.18: */
 DUMMY(move_pages);
@@ -111,7 +108,7 @@ DUMMY(signalfd4);
 DUMMY(inotify_init1);
 /* Linux 2.6.31: */
 DUMMY(perf_event_open);
-/* Linux 2.6.38: */
+/* Linux 2.6.36: */
 DUMMY(fanotify_init);
 DUMMY(fanotify_mark);
 /* Linux 2.6.39: */
@@ -120,7 +117,6 @@ DUMMY(open_by_handle_at);
 DUMMY(clock_adjtime);
 /* Linux 3.0: */
 DUMMY(setns);
-DUMMY(getcpu);
 /* Linux 3.2: */
 DUMMY(process_vm_readv);
 DUMMY(process_vm_writev);
@@ -130,11 +126,8 @@ DUMMY(kcmp);
 DUMMY(finit_module);
 DUMMY(sched_setattr);
 DUMMY(sched_getattr);
-/* Linux 3.14: */
-DUMMY(renameat2);
-/* Linux 3.15: */
+/* Linux 3.17: */
 DUMMY(seccomp);
-DUMMY(memfd_create);
 /* Linux 3.18: */
 DUMMY(bpf);
 /* Linux 3.19: */
@@ -145,8 +138,6 @@ DUMMY(userfaultfd);
 DUMMY(membarrier);
 /* Linux 4.4: */
 DUMMY(mlock2);
-/* Linux 4.5: */
-DUMMY(copy_file_range);
 /* Linux 4.6: */
 DUMMY(preadv2);
 DUMMY(pwritev2);

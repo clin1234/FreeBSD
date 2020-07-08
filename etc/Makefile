@@ -2,6 +2,7 @@
 # $FreeBSD$
 
 .include <src.opts.mk>
+.include <src.tools.mk>
 
 FILESGROUPS=	FILES
 NLS_ALIASES=	POSIX C \
@@ -14,23 +15,12 @@ UPDATE_DEPENDFILE=	no
 SUBDIR+=sendmail
 .endif
 
-BIN1=	\
-	login.access \
-	rc.bsdextended \
-	rc.firewall \
-	termcap.small
-
 # NB: keep these sorted by MK_* knobs
 
+ETCMAIL=aliases
 .if ${MK_SENDMAIL} != "no"
-BIN1+=	rc.sendmail
-.endif
-
-.if ${MK_SENDMAIL} == "no"
-ETCMAIL=mailer.conf aliases
-.else
-ETCMAIL=Makefile README mailer.conf access.sample virtusertable.sample \
-	mailertable.sample aliases
+ETCMAIL+=Makefile README access.sample virtusertable.sample \
+	mailertable.sample
 .endif
 
 # Special top level files for FreeBSD
@@ -62,16 +52,16 @@ distribution:
 	@echo "set DESTDIR before running \"make ${.TARGET}\""
 	@false
 .endif
-	cd ${.CURDIR}; \
-	    ${INSTALL} -o ${BINOWN} -g ${BINGRP} -m 644 \
-		${BIN1} ${DESTDIR}/etc
 	${_+_}cd ${.CURDIR}/gss; ${MAKE} install
 	${_+_}cd ${.CURDIR}/mtree; ${MAKE} install
 	${_+_}cd ${SRCTOP}/share/termcap; ${MAKE} etc-termcap
 	${_+_}cd ${SRCTOP}/usr.sbin/rmt; ${MAKE} etc-rmt
+	${INSTALL_SYMLINK} -T "package=runtime" ../var/run/os-release \
+		${DESTDIR}/etc/os-release
 .if ${MK_UNBOUND} != "no"
 	if [ ! -e ${DESTDIR}/etc/unbound ]; then \
-		${INSTALL_SYMLINK} ../var/unbound ${DESTDIR}/etc/unbound; \
+		${INSTALL_SYMLINK} -T "package=unbound" \
+		../var/unbound ${DESTDIR}/etc/unbound; \
 	fi
 .endif
 .if ${MK_SENDMAIL} != "no"
@@ -80,32 +70,33 @@ distribution:
 .if ${MK_KERBEROS} != "no"
 	cd ${.CURDIR}/root; \
 	    ${INSTALL} -o ${BINOWN} -g ${BINGRP} -m 644 \
+		-T "package=runtime" \
 		dot.k5login ${DESTDIR}/root/.k5login;
 .endif
 
 .if ${MK_MAIL} != "no"
 	cd ${.CURDIR}/mail; ${INSTALL} -o ${BINOWN} -g ${BINGRP} -m 644 \
-	    ${ETCMAIL} ${DESTDIR}/etc/mail
+	    -T "package=runtime" ${ETCMAIL} ${DESTDIR}/etc/mail
 	if [ -d ${DESTDIR}/etc/mail -a -f ${DESTDIR}/etc/mail/aliases -a \
 	      ! -f ${DESTDIR}/etc/aliases ]; then \
-		${INSTALL_SYMLINK} mail/aliases ${DESTDIR}/etc/aliases; \
+		${INSTALL_SYMLINK} -T "package=runtime" \
+		mail/aliases ${DESTDIR}/etc/aliases; \
 	fi
 .endif
 .if ${MK_LOCATE} != "no"
-	${INSTALL} -o nobody -g ${BINGRP} -m 644 /dev/null \
-	    ${DESTDIR}/var/db/locate.database
+	${INSTALL} -o nobody -g ${BINGRP} -m 644 -T "package=runtime"\
+	    /dev/null ${DESTDIR}/var/db/locate.database
 .endif
 	cd ${.CURDIR}/..; ${INSTALL} -o ${BINOWN} -g ${BINGRP} -m 444 \
-		${FREEBSD} ${DESTDIR}/
+		-T "package=runtime" ${FREEBSD} ${DESTDIR}/
 .if ${MK_BOOT} != "no"
 .if exists(${SRCTOP}/sys/${MACHINE}/conf/GENERIC.hints)
 	${INSTALL} -o ${BINOWN} -g ${BINGRP} -m 444 \
+	    -T "package=bootloader,config" \
 	    ${SRCTOP}/sys/${MACHINE}/conf/GENERIC.hints \
 	    ${DESTDIR}/boot/device.hints
 .endif
 .endif
-
-MTREE_CMD?=	mtree
 
 MTREES=		mtree/BSD.root.dist		/		\
 		mtree/BSD.var.dist		/var		\
@@ -170,14 +161,10 @@ distrib-dirs: ${MTREES:N/*} distrib-cleanup .PHONY
 .endif
 .if ${MK_NLS} != "no"
 .for alias nls in ${NLS_ALIASES}
-	${INSTALL_SYMLINK} "${nls}" "${DESTDIR}${SHAREDIR}/nls/${alias}"
+	${INSTALL_SYMLINK} -T "package=utilities" \
+	    "${nls}" "${DESTDIR}${SHAREDIR}/nls/${alias}"
 .endfor
 .endif
-
-etc-examples: ${META_DEPS}
-	cd ${.CURDIR}; ${INSTALL} ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m 444 \
-	    ${BIN1} ${BIN2} \
-	    ${DESTDIR}${SHAREDIR}/examples/etc
 
 .include <bsd.prog.mk>
 

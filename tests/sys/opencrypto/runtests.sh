@@ -2,6 +2,7 @@
 #
 # Copyright (c) 2014 The FreeBSD Foundation
 # All rights reserved.
+# Copyright 2019 Enji Cooper
 #
 # This software was developed by John-Mark Gurney under
 # the sponsorship from the FreeBSD Foundation.
@@ -59,7 +60,19 @@ cleanup_tests()
 }
 trap cleanup_tests EXIT INT TERM
 
-for required_module in nexus/aesni cryptodev; do
+cpu_type="$(uname -p)"
+cpu_module=
+
+case ${cpu_type} in
+aarch64)
+	cpu_module=nexus/armv8crypto
+	;;
+amd64|i386)
+	cpu_module=nexus/aesni
+	;;
+esac
+
+for required_module in $cpu_module cryptodev; do
 	if ! kldstat -q -m $required_module; then
 		module_to_load=${required_module#nexus/}
 		if ! kldload ${module_to_load}; then
@@ -81,7 +94,7 @@ if ! sysctl $cdas_sysctl=1; then
 fi
 
 echo "1..1"
-if "$PYTHON" $(dirname $0)/cryptotest.py; then
+if "$PYTHON" $(dirname $0)/cryptotest.py $CRYPTOTEST_ARGS; then
 	echo "ok 1"
 else
 	echo "not ok 1"

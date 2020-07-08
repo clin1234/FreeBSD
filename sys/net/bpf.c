@@ -44,15 +44,16 @@ __FBSDID("$FreeBSD$");
 #include "opt_ddb.h"
 #include "opt_netgraph.h"
 
-#include <sys/types.h>
 #include <sys/param.h>
-#include <sys/lock.h>
-#include <sys/systm.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/fcntl.h>
 #include <sys/jail.h>
+#include <sys/ktr.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
+#include <sys/mutex.h>
 #include <sys/time.h>
 #include <sys/priv.h>
 #include <sys/proc.h>
@@ -62,6 +63,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/ttycom.h>
 #include <sys/uio.h>
 #include <sys/sysent.h>
+#include <sys/systm.h>
 
 #include <sys/event.h>
 #include <sys/file.h>
@@ -212,7 +214,8 @@ static int	filt_bpfread(struct knote *, long);
 static void	bpf_drvinit(void *);
 static int	bpf_stats_sysctl(SYSCTL_HANDLER_ARGS);
 
-SYSCTL_NODE(_net, OID_AUTO, bpf, CTLFLAG_RW, 0, "bpf sysctl");
+SYSCTL_NODE(_net, OID_AUTO, bpf, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "bpf sysctl");
 int bpf_maxinsns = BPF_MAXINSNS;
 SYSCTL_INT(_net_bpf, OID_AUTO, maxinsns, CTLFLAG_RW,
     &bpf_maxinsns, 0, "Maximum bpf program instructions");
@@ -224,7 +227,7 @@ static SYSCTL_NODE(_net_bpf, OID_AUTO, stats, CTLFLAG_MPSAFE | CTLFLAG_RW,
 
 VNET_DEFINE_STATIC(int, bpf_optimize_writers) = 0;
 #define	V_bpf_optimize_writers VNET(bpf_optimize_writers)
-SYSCTL_INT(_net_bpf, OID_AUTO, optimize_writers, CTLFLAG_VNET | CTLFLAG_RW,
+SYSCTL_INT(_net_bpf, OID_AUTO, optimize_writers, CTLFLAG_VNET | CTLFLAG_RWTUN,
     &VNET_NAME(bpf_optimize_writers), 0,
     "Do not send packets until BPF program is set");
 
@@ -272,10 +275,10 @@ static struct filterops bpfread_filtops = {
  *
  * 2. An userland application uses ioctl() call to bpf_d descriptor.
  * All such call are serialized with global lock. BPF filters can be
- * changed, but pointer to old filter will be freed using epoch_call().
+ * changed, but pointer to old filter will be freed using NET_EPOCH_CALL().
  * Thus it should be safe for bpf_tap/bpf_mtap* code to do access to
  * filter pointers, even if change will happen during bpf_tap execution.
- * Destroying of bpf_d descriptor also is doing using epoch_call().
+ * Destroying of bpf_d descriptor also is doing using NET_EPOCH_CALL().
  *
  * 3. An userland application can write packets into bpf_d descriptor.
  * There we need to be sure, that ifnet won't disappear during bpfwrite().
@@ -286,7 +289,7 @@ static struct filterops bpfread_filtops = {
  *
  * 5. The kernel invokes bpfdetach() on interface destroying. All lists
  * are modified with global lock held and actual free() is done using
- * epoch_call().
+ * NET_EPOCH_CALL().
  */
 
 static void
@@ -312,7 +315,7 @@ bpfif_rele(struct bpf_if *bp)
 
 	if (!refcount_release(&bp->bif_refcnt))
 		return;
-	epoch_call(net_epoch_preempt, &bp->epoch_ctx, bpfif_free);
+	NET_EPOCH_CALL(bpfif_free, &bp->epoch_ctx);
 }
 
 static void
@@ -328,7 +331,7 @@ bpfd_rele(struct bpf_d *d)
 
 	if (!refcount_release(&d->bd_refcnt))
 		return;
-	epoch_call(net_epoch_preempt, &d->epoch_ctx, bpfd_free);
+	NET_EPOCH_CALL(bpfd_free, &d->epoch_ctx);
 }
 
 static struct bpf_program_buffer*
@@ -2034,8 +2037,7 @@ bpf_setf(struct bpf_d *d, struct bpf_program *fp, u_long cmd)
 	BPFD_UNLOCK(d);
 
 	if (fcode != NULL)
-		epoch_call(net_epoch_preempt, &fcode->epoch_ctx,
-		    bpf_program_buffer_free);
+		NET_EPOCH_CALL(bpf_program_buffer_free, &fcode->epoch_ctx);
 
 	if (track_event)
 		EVENTHANDLER_INVOKE(bpf_track,
@@ -2302,7 +2304,7 @@ bpf_mtap(struct bpf_if *bp, struct mbuf *m)
 	int gottime;
 
 	/* Skip outgoing duplicate packets. */
-	if ((m->m_flags & M_PROMISC) != 0 && m->m_pkthdr.rcvif == NULL) {
+	if ((m->m_flags & M_PROMISC) != 0 && m_rcvif(m) == NULL) {
 		m->m_flags &= ~M_PROMISC;
 		return;
 	}
@@ -2312,7 +2314,7 @@ bpf_mtap(struct bpf_if *bp, struct mbuf *m)
 
 	NET_EPOCH_ENTER(et);
 	CK_LIST_FOREACH(d, &bp->bif_dlist, bd_next) {
-		if (BPF_CHECK_DIRECTION(d, m->m_pkthdr.rcvif, bp->bif_ifp))
+		if (BPF_CHECK_DIRECTION(d, m_rcvif(m), bp->bif_ifp))
 			continue;
 		counter_u64_add(d->bd_rcount, 1);
 #ifdef BPF_JITTER
@@ -2367,6 +2369,7 @@ bpf_mtap2(struct bpf_if *bp, void *data, u_int dlen, struct mbuf *m)
 	 * Note that we cut corners here; we only setup what's
 	 * absolutely needed--this mbuf should never go anywhere else.
 	 */
+	mb.m_flags = 0;
 	mb.m_next = m;
 	mb.m_data = data;
 	mb.m_len = dlen;
@@ -2487,6 +2490,11 @@ catchpacket(struct bpf_d *d, u_char *pkt, u_int pktlen, u_int snaplen,
 	int tstype;
 
 	BPFD_LOCK_ASSERT(d);
+	if (d->bd_bif == NULL) {
+		/* Descriptor was detached in concurrent thread */
+		counter_u64_add(d->bd_dcount, 1);
+		return;
+	}
 
 	/*
 	 * Detect whether user space has released a buffer back to us, and if

@@ -53,6 +53,7 @@ options 	UFS_DIRHASH		#Improve performance on big directories
 options 	UFS_GJOURNAL		#Enable gjournal-based UFS journaling
 options 	QUOTA			#Enable disk quotas for UFS
 options 	MD_ROOT			#MD is a potential root device
+options 	MD_ROOT_MEM		#Enable use of initrd as MD root
 options 	NFSCL			#Network Filesystem Client
 options 	NFSD			#Network Filesystem Server
 options 	NFSLOCKD		#Network Lock Manager
@@ -109,6 +110,7 @@ options 	VERBOSE_SYSINIT=0	# Support debug.verbose_sysinit, off by default
 options 	EKCD			# Support for encrypted kernel dumps
 options 	GZIO			# gzip-compressed kernel and user dumps
 options 	ZSTDIO			# zstd-compressed kernel and user dumps
+options 	DEBUGNET		# debugnet networking
 options 	NETDUMP			# netdump(4) client support
 
 # Make an SMP-capable kernel by default
@@ -134,6 +136,7 @@ options		NVME_USE_NVD=0	# prefer the cam(4) based nda(4) driver
 device		nvd		# expose NVMe namespaces as disks, depends on nvme
 
 # SCSI Controllers
+device		aacraid		# Adaptec by PMC RAID
 device		ahc		# AHA2940 and onboard AIC7xxx devices
 options 	AHC_ALLOW_MEMIO	# Attempt to use memory mapped I/O
 device		isp		# Qlogic family
@@ -165,6 +168,7 @@ device		iflib
 # Ethernet hardware
 device		em		# Intel PRO/1000 Gigabit Ethernet Family
 device		ix		# Intel PRO/10GbE PCIE PF Ethernet Family
+device		ixl		# Intel 700 Series Physical Function
 device		ixv		# Intel PRO/10GbE PCIE VF Ethernet Family
 device		glc		# Sony Playstation 3 Ethernet
 device		llan		# IBM pSeries Virtual Ethernet
@@ -182,7 +186,6 @@ device		rl		# RealTek 8129/8139
 # Pseudo devices.
 device		crypto		# core crypto support
 device		loop		# Network loopback
-device		random		# Entropy device
 device		ether		# Ethernet support
 device		vlan		# 802.1Q VLAN support
 device		tuntap		# Packet tunnel.
@@ -245,6 +248,7 @@ device		pmu
 # Sound support
 device		sound		# Generic sound driver (required)
 device		snd_ai2s	# Apple I2S audio
+device		snd_hda		# Intel High Definition Audio
 device		snd_uaudio	# USB Audio
 
 # Netmap provides direct access to TX/RX rings on supported NICs
@@ -254,3 +258,12 @@ device		netmap		# netmap(4) support
 options 	EVDEV_SUPPORT		# evdev support in legacy drivers
 device		evdev			# input event device support
 device		uinput			# install /dev/uinput cdev
+
+# VirtIO support
+device          virtio                  # Generic VirtIO bus (required)
+device          virtio_pci              # VirtIO PCI device
+device          vtnet                   # VirtIO Ethernet device
+device          virtio_blk              # VirtIO Block device
+device          virtio_scsi             # VirtIO SCSI device
+device          virtio_balloon          # VirtIO Memory Balloon device
+

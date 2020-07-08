@@ -68,6 +68,7 @@ struct sysentvec elf64_freebsd_sysvec = {
 	.sv_usrstack	= USRSTACK,
 	.sv_psstrings	= PS_STRINGS,
 	.sv_stackprot	= VM_PROT_ALL,
+	.sv_copyout_auxargs = __elfN(freebsd_copyout_auxargs),
 	.sv_copyout_strings	= exec_copyout_strings,
 	.sv_setregs	= exec_setregs,
 	.sv_fixlimit	= NULL,
@@ -82,6 +83,7 @@ struct sysentvec elf64_freebsd_sysvec = {
 	.sv_schedtail	= NULL,
 	.sv_thread_detach = NULL,
 	.sv_trap	= NULL,
+	.sv_stackgap	= elf64_stackgap,
 };
 INIT_SYSENTVEC(elf64_sysvec, &elf64_freebsd_sysvec);
 
@@ -184,7 +186,7 @@ elf_is_ifunc_reloc(Elf_Size r_info)
 /* Process one elf relocation with addend. */
 static int
 elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
-    int type, elf_lookup_fn lookup)
+    int type, bool late_ifunc, elf_lookup_fn lookup)
 {
 	Elf64_Addr *where, val;
 	Elf32_Addr *where32, val32;
@@ -222,6 +224,13 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 		break;
 	default:
 		panic("unknown reloc type %d\n", type);
+	}
+
+	if (late_ifunc) {
+		KASSERT(type == ELF_RELOC_RELA,
+		    ("Only RELA ifunc relocations are supported"));
+		if (rtype != R_X86_64_IRELATIVE)
+			return (0);
 	}
 
 	switch (rtype) {
@@ -266,7 +275,6 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 			 */
 			printf("kldload: unexpected R_COPY relocation\n");
 			return (-1);
-			break;
 
 		case R_X86_64_GLOB_DAT:	/* S */
 		case R_X86_64_JMP_SLOT:	/* XXX need addend + offset */
@@ -278,7 +286,7 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 			break;
 
 		case R_X86_64_RELATIVE:	/* B + A */
-			addr = relocbase + addend;
+			addr = elf_relocaddr(lf, relocbase + addend);
 			val = addr;
 			if (*where != val)
 				*where = val;
@@ -304,7 +312,7 @@ elf_reloc(linker_file_t lf, Elf_Addr relocbase, const void *data, int type,
     elf_lookup_fn lookup)
 {
 
-	return (elf_reloc_internal(lf, relocbase, data, type, lookup));
+	return (elf_reloc_internal(lf, relocbase, data, type, false, lookup));
 }
 
 int
@@ -312,7 +320,15 @@ elf_reloc_local(linker_file_t lf, Elf_Addr relocbase, const void *data,
     int type, elf_lookup_fn lookup)
 {
 
-	return (elf_reloc_internal(lf, relocbase, data, type, lookup));
+	return (elf_reloc_internal(lf, relocbase, data, type, false, lookup));
+}
+
+int
+elf_reloc_late(linker_file_t lf, Elf_Addr relocbase, const void *data,
+    int type, elf_lookup_fn lookup)
+{
+
+	return (elf_reloc_internal(lf, relocbase, data, type, true, lookup));
 }
 
 int
@@ -324,6 +340,13 @@ elf_cpu_load_file(linker_file_t lf __unused)
 
 int
 elf_cpu_unload_file(linker_file_t lf __unused)
+{
+
+	return (0);
+}
+
+int
+elf_cpu_parse_dynamic(caddr_t loadbase __unused, Elf_Dyn *dynamic __unused)
 {
 
 	return (0);

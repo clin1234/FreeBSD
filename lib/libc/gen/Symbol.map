@@ -338,6 +338,7 @@ FBSD_1.2 {
 	getutxid;
 	getutxline;
 	getutxuser;
+	pthread_getthreadid_np;
 	pututxline;
 	sem_close;
 	sem_destroy;
@@ -419,6 +420,13 @@ FBSD_1.5 {
 	sem_clockwait_np;
 	setproctitle_fast;
 	timespec_get;
+};
+
+FBSD_1.6 {
+	memalign;
+	sigandset;
+	sigisemptyset;
+	sigorset;
 };
 
 FBSDprivate_1.0 {
@@ -503,7 +511,6 @@ FBSDprivate_1.0 {
 	/* __pw_match_entry; */
 	/* __pw_parse_entry; */
 	__fdnlist;	/* used by libkvm */
-	/* __aout_fdnlist; */
 	/* __elf_is_okay__; */
 	/* __elf_fdnlist; */
 	__opendir2;

@@ -43,6 +43,7 @@
 #include <sys/mount.h>
 #include <sys/bio.h>
 #include <sys/buf.h>
+#include <sys/endian.h>
 #include <sys/vnode.h>
 #include <sys/malloc.h>
 #include <sys/rwlock.h>
@@ -188,7 +189,7 @@ ext2_indirtrunc(struct inode *ip, daddr_t lbn, daddr_t dbn,
 	 */
 	for (i = NINDIR(fs) - 1, nlbn = lbn + 1 - i * factor; i > last;
 	    i--, nlbn += factor) {
-		nb = bap[i];
+		nb = le32toh(bap[i]);
 		if (nb == 0)
 			continue;
 		if (level > SINGLE) {
@@ -206,7 +207,7 @@ ext2_indirtrunc(struct inode *ip, daddr_t lbn, daddr_t dbn,
 	 */
 	if (level > SINGLE && lastbn >= 0) {
 		last = lastbn % factor;
-		nb = bap[i];
+		nb = le32toh(bap[i]);
 		if (nb != 0) {
 			if ((error = ext2_indirtrunc(ip, nlbn, fsbtodb(fs, nb),
 			    last, level - 1, &blkcount)) != 0)
@@ -356,7 +357,7 @@ ext2_ind_truncate(struct vnode *vp, off_t length, int flags, struct ucred *cred,
 		oip->i_ib[i] = oldblks[EXT2_NDADDR + i];
 	}
 	oip->i_size = osize;
-	error = vtruncbuf(ovp, cred, length, (int)fs->e2fs_bsize);
+	error = vtruncbuf(ovp, length, (int)fs->e2fs_bsize);
 	if (error && (allerror == 0))
 		allerror = error;
 	vnode_pager_setsize(ovp, length);
@@ -530,7 +531,7 @@ ext2_ext_truncate(struct vnode *vp, off_t length, int flags,
 	}
 
 	oip->i_size = osize;
-	error = vtruncbuf(ovp, cred, length, (int)fs->e2fs_bsize);
+	error = vtruncbuf(ovp, length, (int)fs->e2fs_bsize);
 	if (error)
 		return (error);
 
@@ -639,6 +640,5 @@ ext2_reclaim(struct vop_reclaim_args *ap)
 	vfs_hash_remove(vp);
 	free(vp->v_data, M_EXT2NODE);
 	vp->v_data = 0;
-	vnode_destroy_vobject(vp);
 	return (0);
 }

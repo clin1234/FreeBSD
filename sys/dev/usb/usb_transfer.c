@@ -106,6 +106,33 @@ static const struct usb_config usb_control_ep_cfg[USB_CTRL_XFER_MAX] = {
 	},
 };
 
+static const struct usb_config usb_control_ep_quirk_cfg[USB_CTRL_XFER_MAX] = {
+
+	/* This transfer is used for generic control endpoint transfers */
+
+	[0] = {
+		.type = UE_CONTROL,
+		.endpoint = 0x00,	/* Control endpoint */
+		.direction = UE_DIR_ANY,
+		.bufsize = 65535,	/* bytes */
+		.callback = &usb_request_callback,
+		.usb_mode = USB_MODE_DUAL,	/* both modes */
+	},
+
+	/* This transfer is used for generic clear stall only */
+
+	[1] = {
+		.type = UE_CONTROL,
+		.endpoint = 0x00,	/* Control pipe */
+		.direction = UE_DIR_ANY,
+		.bufsize = sizeof(struct usb_device_request),
+		.callback = &usb_do_clear_stall_callback,
+		.timeout = 1000,	/* 1 second */
+		.interval = 50,	/* 50ms */
+		.usb_mode = USB_MODE_HOST,
+	},
+};
+
 /* function prototypes */
 
 static void	usbd_update_max_frame_size(struct usb_xfer *);
@@ -345,6 +372,81 @@ usbd_transfer_setup_sub_malloc(struct usb_setup_params *parm,
 	return (0);
 }
 #endif
+
+/*------------------------------------------------------------------------*
+ *	usbd_get_max_frame_length
+ *
+ * This function returns the maximum single frame length as computed by
+ * usbd_transfer_setup(). It is useful when computing buffer sizes for
+ * devices having multiple alternate settings. The SuperSpeed endpoint
+ * companion pointer is allowed to be NULL.
+ *------------------------------------------------------------------------*/
+uint32_t
+usbd_get_max_frame_length(const struct usb_endpoint_descriptor *edesc,
+    const struct usb_endpoint_ss_comp_descriptor *ecomp,
+    enum usb_dev_speed speed)
+{
+	uint32_t max_packet_size;
+	uint32_t max_packet_count;
+	uint8_t type;
+
+	max_packet_size = UGETW(edesc->wMaxPacketSize);
+	max_packet_count = 1;
+	type = (edesc->bmAttributes & UE_XFERTYPE);
+
+	switch (speed) {
+	case USB_SPEED_HIGH:
+		switch (type) {
+		case UE_ISOCHRONOUS:
+		case UE_INTERRUPT:
+			max_packet_count +=
+			    (max_packet_size >> 11) & 3;
+
+			/* check for invalid max packet count */
+			if (max_packet_count > 3)
+				max_packet_count = 3;
+			break;
+		default:
+			break;
+		}
+		max_packet_size &= 0x7FF;
+		break;
+	case USB_SPEED_SUPER:
+		max_packet_count += (max_packet_size >> 11) & 3;
+
+		if (ecomp != NULL)
+			max_packet_count += ecomp->bMaxBurst;
+
+		if ((max_packet_count == 0) || 
+		    (max_packet_count > 16))
+			max_packet_count = 16;
+
+		switch (type) {
+		case UE_CONTROL:
+			max_packet_count = 1;
+			break;
+		case UE_ISOCHRONOUS:
+			if (ecomp != NULL) {
+				uint8_t mult;
+
+				mult = UE_GET_SS_ISO_MULT(
+				    ecomp->bmAttributes) + 1;
+				if (mult > 3)
+					mult = 3;
+
+				max_packet_count *= mult;
+			}
+			break;
+		default:
+			break;
+		}
+		max_packet_size &= 0x7FF;
+		break;
+	default:
+		break;
+	}
+	return (max_packet_size * max_packet_count);
+}
 
 /*------------------------------------------------------------------------*
  *	usbd_transfer_setup_sub - transfer setup subroutine
@@ -1021,7 +1123,8 @@ usbd_transfer_setup(struct usb_device *udev,
 			 * context, else there is a chance of
 			 * deadlock!
 			 */
-			if (setup_start == usb_control_ep_cfg)
+			if (setup_start == usb_control_ep_cfg ||
+			    setup_start == usb_control_ep_quirk_cfg)
 				info->done_p =
 				    USB_BUS_CONTROL_XFER_PROC(udev->bus);
 			else if (xfer_mtx == &Giant)
@@ -2565,11 +2668,14 @@ usbd_transfer_done(struct usb_xfer *xfer, usb_error_t error)
 	}
 #endif
 	/* keep some statistics */
-	if (xfer->error) {
-		info->bus->stats_err.uds_requests
+	if (xfer->error == USB_ERR_CANCELLED) {
+		info->udev->stats_cancelled.uds_requests
+		    [xfer->endpoint->edesc->bmAttributes & UE_XFERTYPE]++;
+	} else if (xfer->error != USB_ERR_NORMAL_COMPLETION) {
+		info->udev->stats_err.uds_requests
 		    [xfer->endpoint->edesc->bmAttributes & UE_XFERTYPE]++;
 	} else {
-		info->bus->stats_ok.uds_requests
+		info->udev->stats_ok.uds_requests
 		    [xfer->endpoint->edesc->bmAttributes & UE_XFERTYPE]++;
 	}
 
@@ -3149,7 +3255,8 @@ repeat:
 	 */
 	iface_index = 0;
 	if (usbd_transfer_setup(udev, &iface_index,
-	    udev->ctrl_xfer, usb_control_ep_cfg, USB_CTRL_XFER_MAX, NULL,
+	    udev->ctrl_xfer, udev->bus->control_ep_quirk ?
+	    usb_control_ep_quirk_cfg : usb_control_ep_cfg, USB_CTRL_XFER_MAX, NULL,
 	    &udev->device_mtx)) {
 		DPRINTFN(0, "could not setup default "
 		    "USB transfer\n");

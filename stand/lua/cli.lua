@@ -125,6 +125,15 @@ cli['boot-conf'] = function(...)
 	core.autoboot(argstr)
 end
 
+cli['read-conf'] = function(...)
+	local _, argv = cli.arguments(...)
+	config.readConf(assert(core.popFrontTable(argv)))
+end
+
+cli['reload-conf'] = function(...)
+	config.reload()
+end
+
 -- Used for splitting cli varargs into cmd_name and the rest of argv
 function cli.arguments(...)
 	local argv = {...}

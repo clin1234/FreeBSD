@@ -508,6 +508,7 @@ SOURCEDIR=$(realpath "$SOURCEDIR")
 
 # Setup make to use system files from SOURCEDIR
 MM_MAKE="make ${ARCHSTRING} -m ${SOURCEDIR}/share/mk -DNO_FILEMON"
+MM_MAKE="${MM_MAKE} -j$(/sbin/sysctl -n hw.ncpu)"
 
 # Check DESTDIR against the mergemaster mtree database to see what
 # files the user changed from the reference files.
@@ -669,12 +670,9 @@ case "${RERUN}" in
     ;;
   *)
     # Only set up files that are crucial to {build|install}world
-    { MM_PASSDIR="${SOURCEDIR}/lib/libc/gen"
-      # If on an older tree, use it instead.  Delete after 13.0.
-      [ -f ${SOURCEDIR}/etc/master.passwd ] && MM_PASSDIR="${SOURCEDIR}/etc"
-      mkdir -p ${TEMPROOT}/etc &&
-      cp -p ${MM_PASSDIR}/master.passwd ${TEMPROOT}/etc &&
-      install -p -o root -g wheel -m 0644 ${MM_PASSDIR}/group ${TEMPROOT}/etc;} ||
+    { mkdir -p ${TEMPROOT}/etc &&
+      cp -p ${SOURCEDIR}/etc/master.passwd ${TEMPROOT}/etc &&
+      install -p -o root -g wheel -m 0644 ${SOURCEDIR}/etc/group ${TEMPROOT}/etc;} ||
     { echo '';
       echo '  *** FATAL ERROR: Cannot copy files to the temproot environment';
       echo '';
@@ -885,6 +883,9 @@ mm_install () {
     case "${1#.}" in
     /etc/mail/aliases)
       NEED_NEWALIASES=yes
+      ;;
+    /usr/share/certs/trusted/* | /usr/share/certs/blacklisted/*)
+      NEED_CERTCTL=yes
       ;;
     /etc/login.conf)
       NEED_CAP_MKDB=yes
@@ -1354,6 +1355,23 @@ case "${NEED_PWD_MKDB}" in
     echo "    '/usr/sbin/pwd_mkdb -p /etc/master.passwd'"
     echo "     to rebuild your password files"
     run_it_now '/usr/sbin/pwd_mkdb -p /etc/master.passwd'
+  fi
+  ;;
+esac
+
+case "${NEED_CERTCTL}" in
+'') ;;
+*)
+  echo ''
+  echo "*** You installed files in /etc/ssl/certs, so make sure that you run"
+  if [ -n "${DESTDIR}" ]; then
+    echo "    'env DESTDIR=${DESTDIR} /usr/sbin/certctl rehash'"
+    echo "     to rebuild your certificate authority database"
+    run_it_now "env DESTDIR=${DESTDIR} /usr/sbin/certctl rehash"
+  else
+    echo "    '/usr/sbin/certctl rehash'"
+    echo "     to rebuild your certificate authority database"
+    run_it_now "/usr/sbin/certctl rehash"
   fi
   ;;
 esac

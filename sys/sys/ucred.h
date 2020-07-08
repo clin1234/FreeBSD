@@ -35,6 +35,10 @@
 #ifndef _SYS_UCRED_H_
 #define	_SYS_UCRED_H_
 
+#if defined(_KERNEL) || defined(_WANT_UCRED)
+#include <sys/_lock.h>
+#include <sys/_mutex.h>
+#endif
 #include <bsm/audit.h>
 
 struct loginclass;
@@ -46,10 +50,19 @@ struct loginclass;
  *
  * Please do not inspect cr_uid directly to determine superuserness.  The
  * priv(9) interface should be used to check for privilege.
+ *
+ * Lock reference:
+ *      c - cr_mtx
+ *
+ * Unmarked fields are constant after creation.
+ *
+ * See "Credential management" comment in kern_prot.c for more information.
  */
 #if defined(_KERNEL) || defined(_WANT_UCRED)
 struct ucred {
-	u_int	cr_ref;			/* reference count */
+	struct mtx cr_mtx;
+	u_int	cr_ref;			/* (c) reference count */
+	u_int	cr_users;		/* (c) proc + thread using this cred */
 #define	cr_startcopy cr_uid
 	uid_t	cr_uid;			/* effective user id */
 	uid_t	cr_ruid;		/* real user id */
@@ -87,7 +100,10 @@ struct xucred {
 	uid_t	cr_uid;			/* effective user id */
 	short	cr_ngroups;		/* number of groups */
 	gid_t	cr_groups[XU_NGROUPS];	/* groups */
-	void	*_cr_unused1;		/* compatibility with old ucred */
+	union {
+		void	*_cr_unused1;	/* compatibility with old ucred */
+		pid_t	cr_pid;
+	};
 };
 #define	XUCRED_VERSION	0
 
@@ -109,11 +125,16 @@ struct ucred	*crcopysafe(struct proc *p, struct ucred *cr);
 struct ucred	*crdup(struct ucred *cr);
 void	crextend(struct ucred *cr, int n);
 void	proc_set_cred_init(struct proc *p, struct ucred *cr);
-struct ucred	*proc_set_cred(struct proc *p, struct ucred *cr);
+void	proc_set_cred(struct proc *p, struct ucred *cr);
+void	proc_unset_cred(struct proc *p);
 void	crfree(struct ucred *cr);
+struct ucred	*crcowsync(void);
 struct ucred	*crget(void);
 struct ucred	*crhold(struct ucred *cr);
+struct ucred	*crcowget(struct ucred *cr);
+void	crcowfree(struct thread *td);
 void	cru2x(struct ucred *cr, struct xucred *xcr);
+void	cru2xt(struct thread *td, struct xucred *xcr);
 void	crsetgroups(struct ucred *cr, int n, gid_t *groups);
 int	groupmember(gid_t gid, struct ucred *cred);
 #endif /* _KERNEL */

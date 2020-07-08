@@ -168,6 +168,7 @@ load_key_buf(unsigned char *buf, size_t nbytes)
 	initialize();
 
 	if (!(buf[0] & OPENPGP_TAG_ISTAG)) {
+		/* Note: we do *not* free data */
 		data = dearmor((char *)buf, nbytes, &nbytes);
 		ptr = data;
 	} else
@@ -190,7 +191,6 @@ load_key_buf(unsigned char *buf, size_t nbytes)
 			}
 		}
 	}
-	free(data);
 	return (key);
 }
 
@@ -209,8 +209,51 @@ openpgp_trust_add(OpenPGP_key *key)
 
 		LIST_INIT(&trust_list);
 	}
-	if (key)
+	if (key && openpgp_trust_get(key->id) == NULL) {
+		if (ve_anchor_verbose_get())
+			printf("openpgp_trust_add(%s)\n", key->id);
 		LIST_INSERT_HEAD(&trust_list, key, entries);
+	}
+}
+
+/**
+ * @brief add trust anchor from buf
+ */
+int
+openpgp_trust_add_buf(unsigned char *buf, size_t nbytes)
+{
+	OpenPGP_key *key;
+
+	if ((key = load_key_buf(buf, nbytes))) {
+		openpgp_trust_add(key);
+	}
+	return (key != NULL);
+}
+
+
+/**
+ * @brief if keyID is in our list clobber it
+ *
+ * @return true if keyID removed
+ */
+int
+openpgp_trust_revoke(const char *keyID)
+{
+	OpenPGP_key *key, *tkey;
+
+	openpgp_trust_add(NULL);	/* initialize if needed */
+
+	LIST_FOREACH(key, &trust_list, entries) {
+		if (strcmp(key->id, keyID) == 0) {
+			tkey = key;
+			LIST_REMOVE(tkey, entries);
+			printf("openpgp_trust_revoke(%s)\n", key->id);
+			memset(key, 0, sizeof(OpenPGP_key));
+			free(key);
+			return (1);
+		}
+	}
+	return (0);
 }
 
 /**
@@ -249,7 +292,9 @@ load_key_file(const char *kfile)
 	return (key);
 }
 
+#ifdef HAVE_TA_ASC_H
 #include <ta_asc.h>
+#endif
 
 #ifndef _STANDALONE
 /* we can lookup keyID in filesystem */
@@ -296,6 +341,7 @@ load_key_id(const char *keyID)
 	if (!key)
 		key = load_trusted_key_id(keyID);
 #endif
+	DEBUG_PRINTF(2, ("load_key_id(%s): %s\n", keyID, key ? "found" : "nope"));
 	return (key);
 }
 
@@ -327,8 +373,8 @@ openpgp_trust_init(void)
 				}
 			}
 		}
-	}
 #endif
+	}
 	return (once);
 }
 

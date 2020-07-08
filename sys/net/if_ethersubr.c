@@ -800,29 +800,37 @@ VNET_SYSUNINIT(vnet_ether_uninit, SI_SUB_PROTO_IF, SI_ORDER_ANY,
 static void
 ether_input(struct ifnet *ifp, struct mbuf *m)
 {
-
+	struct epoch_tracker et;
 	struct mbuf *mn;
+	bool needs_epoch;
+
+	needs_epoch = !(ifp->if_flags & IFF_KNOWSEPOCH);
 
 	/*
 	 * The drivers are allowed to pass in a chain of packets linked with
 	 * m_nextpkt. We split them up into separate packets here and pass
 	 * them up. This allows the drivers to amortize the receive lock.
 	 */
+	CURVNET_SET_QUIET(ifp->if_vnet);
+	if (__predict_false(needs_epoch))
+		NET_EPOCH_ENTER(et);
 	while (m) {
 		mn = m->m_nextpkt;
 		m->m_nextpkt = NULL;
 
 		/*
-		 * We will rely on rcvif being set properly in the deferred context,
-		 * so assert it is correct here.
+		 * We will rely on rcvif being set properly in the deferred
+		 * context, so assert it is correct here.
 		 */
+		MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
 		KASSERT(m->m_pkthdr.rcvif == ifp, ("%s: ifnet mismatch m %p "
 		    "rcvif %p ifp %p", __func__, m, m->m_pkthdr.rcvif, ifp));
-		CURVNET_SET_QUIET(ifp->if_vnet);
 		netisr_dispatch(NETISR_ETHER, m);
-		CURVNET_RESTORE();
 		m = mn;
 	}
+	if (__predict_false(needs_epoch))
+		NET_EPOCH_EXIT(et);
+	CURVNET_RESTORE();
 }
 
 /*
@@ -835,6 +843,7 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 	int i, isr;
 	u_short ether_type;
 
+	NET_EPOCH_ASSERT();
 	KASSERT(ifp != NULL, ("%s: NULL interface pointer", __func__));
 
 	/* Do not grab PROMISC frames in case we are re-entered. */
@@ -1043,7 +1052,8 @@ ether_reassign(struct ifnet *ifp, struct vnet *new_vnet, char *unused __unused)
 #endif
 
 SYSCTL_DECL(_net_link);
-SYSCTL_NODE(_net_link, IFT_ETHER, ether, CTLFLAG_RW, 0, "Ethernet");
+SYSCTL_NODE(_net_link, IFT_ETHER, ether, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Ethernet");
 
 #if 0
 /*
@@ -1325,9 +1335,10 @@ ether_vlanencap(struct mbuf *m, uint16_t tag)
 	return (m);
 }
 
-static SYSCTL_NODE(_net_link, IFT_L2VLAN, vlan, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_net_link, IFT_L2VLAN, vlan, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "IEEE 802.1Q VLAN");
-static SYSCTL_NODE(_net_link_vlan, PF_LINK, link, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_net_link_vlan, PF_LINK, link,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "for consistency");
 
 VNET_DEFINE_STATIC(int, soft_pad);
@@ -1408,27 +1419,39 @@ ether_8021q_frame(struct mbuf **mp, struct ifnet *ife, struct ifnet *p,
 
 /*
  * Allocate an address from the FreeBSD Foundation OUI.  This uses a
- * cryptographic hash function on the containing jail's UUID and the interface
- * name to attempt to provide a unique but stable address.  Pseudo-interfaces
- * which require a MAC address should use this function to allocate
- * non-locally-administered addresses.
+ * cryptographic hash function on the containing jail's name, UUID and the
+ * interface name to attempt to provide a unique but stable address.
+ * Pseudo-interfaces which require a MAC address should use this function to
+ * allocate non-locally-administered addresses.
  */
 void
 ether_gen_addr(struct ifnet *ifp, struct ether_addr *hwaddr)
 {
-#define	ETHER_GEN_ADDR_BUFSIZ	HOSTUUIDLEN + IFNAMSIZ + 2
 	SHA1_CTX ctx;
-	char buf[ETHER_GEN_ADDR_BUFSIZ];
+	char *buf;
 	char uuid[HOSTUUIDLEN + 1];
 	uint64_t addr;
 	int i, sz;
 	char digest[SHA1_RESULTLEN];
+	char jailname[MAXHOSTNAMELEN];
 
 	getcredhostuuid(curthread->td_ucred, uuid, sizeof(uuid));
-	sz = snprintf(buf, ETHER_GEN_ADDR_BUFSIZ, "%s-%s", uuid, ifp->if_xname);
+	/* If each (vnet) jail would also have a unique hostuuid this would not
+	 * be necessary. */
+	getjailname(curthread->td_ucred, jailname, sizeof(jailname));
+	sz = asprintf(&buf, M_TEMP, "%s-%s-%s", uuid, if_name(ifp),
+	    jailname);
+	if (sz < 0) {
+		/* Fall back to a random mac address. */
+		arc4rand(hwaddr, sizeof(*hwaddr), 0);
+		hwaddr->octet[0] = 0x02;
+		return;
+	}
+
 	SHA1Init(&ctx);
 	SHA1Update(&ctx, buf, sz);
 	SHA1Final(digest, &ctx);
+	free(buf, M_TEMP);
 
 	addr = ((digest[0] << 16) | (digest[1] << 8) | digest[2]) &
 	    OUI_FREEBSD_GENERATED_MASK;

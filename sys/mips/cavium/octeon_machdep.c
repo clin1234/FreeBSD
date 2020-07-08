@@ -56,8 +56,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/user.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 
 #include <machine/atomic.h>
 #include <machine/cache.h>
@@ -73,7 +75,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/pcpu.h>
 #include <machine/pte.h>
 #include <machine/trap.h>
-#include <machine/vmparam.h>
 
 #include <contrib/octeon-sdk/cvmx.h>
 #include <contrib/octeon-sdk/cvmx-bootmem.h>
@@ -96,8 +97,6 @@ struct octeon_feature_description {
 };
 
 extern int	*end;
-extern char cpu_model[];
-extern char cpu_board[];
 static char octeon_kenv[0x2000];
 
 static const struct octeon_feature_description octeon_feature_descriptions[] = {
@@ -445,8 +444,9 @@ sysctl_machdep_led_display(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-SYSCTL_PROC(_machdep, OID_AUTO, led_display, CTLTYPE_STRING | CTLFLAG_WR,
-    NULL, 0, sysctl_machdep_led_display, "A",
+SYSCTL_PROC(_machdep, OID_AUTO, led_display,
+    CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_NEEDGIANT, NULL, 0,
+    sysctl_machdep_led_display, "A",
     "String to display on LED display");
 
 void

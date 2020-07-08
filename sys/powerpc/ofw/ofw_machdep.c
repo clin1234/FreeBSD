@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <sys/disk.h>
 #include <sys/fcntl.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/smp.h>
 #include <sys/stat.h>
@@ -86,6 +87,9 @@ char		save_trap_of[0x2f00];            /* EXC_LAST */
 int		ofwcall(void *);
 static int	openfirmware(void *args);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfortify-source"
+
 __inline void
 ofw_save_trap_vec(char *save_trap_vec)
 {
@@ -105,6 +109,8 @@ ofw_restore_trap_vec(char *restore_trap_vec)
 	    EXC_LAST - EXC_RST);
 	__syncicache((void *)PHYS_TO_DMAP(EXC_RSVD), EXC_LAST - EXC_RSVD);
 }
+
+#pragma clang diagnostic pop
 
 /*
  * Saved SPRG0-3 from OpenFirmware. Will be restored prior to the callback.
@@ -460,9 +466,8 @@ void
 ofw_numa_mem_regions(struct numa_mem_region *memp, int *memsz)
 {
 	phandle_t phandle;
-	int res, count, msz;
+	int count, msz;
 	char name[31];
-	cell_t associativity[5];
 	struct numa_mem_region *curmemp;
 
 	msz = 0;
@@ -480,13 +485,8 @@ ofw_numa_mem_regions(struct numa_mem_region *memp, int *memsz)
 		if (count == 0)
 			continue;
 		curmemp = &memp[msz];
-		res = OF_getproplen(phandle, "ibm,associativity");
-		if (res <= 0)
-			continue;
 		MPASS(count == 1);
-		OF_getencprop(phandle, "ibm,associativity",
-			associativity, res);
-		curmemp->mr_domain = associativity[3] - 1;
+		curmemp->mr_domain = platform_node_numa_domain(phandle);
 		if (bootverbose)
 			printf("%s %#jx-%#jx domain(%ju)\n",
 			    name, (uintmax_t)curmemp->mr_start,

@@ -55,7 +55,7 @@ linux${SFX}_assym.h: linux${SFX}_genassym.o
 
 linux${SFX}_locore.o: linux${SFX}_assym.h assym.inc
 	${CC} -x assembler-with-cpp -DLOCORE -m32 -shared -s			\
-	-pipe -I. -I${SYSDIR} -Werror -Wall -fno-common -nostdinc -nostdlib	\
+	-pipe -I. -I${SYSDIR} ${WERROR} -Wall -fno-common -nostdinc -nostdlib	\
 	-fno-omit-frame-pointer -fPIC						\
 	-Wl,-T${SRCTOP}/sys/${MACHINE_CPUARCH}/linux${SFX}/${VDSO}.lds.s	\
 	-Wl,-soname=${VDSO}.so.1,--eh-frame-hdr,-warn-common		\
@@ -78,7 +78,7 @@ ${VDSO}.so: linux${SFX}_locore.o
 .endif
 
 linux${SFX}_genassym.o: offset.inc
-	${CC} -c ${CFLAGS:N-flto:N-fno-common} ${.IMPSRC}
+	${CC} -c ${CFLAGS:N-flto:N-fno-common} -fcommon ${.IMPSRC}
 
 .if !defined(KERNBUILDDIR)
 .warning Building Linuxulator outside of a kernel does not make sense

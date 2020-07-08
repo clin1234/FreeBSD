@@ -34,6 +34,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysproto.h>
+#ifdef COMPAT_LINUX32
+#include <sys/abi_compat.h>
+#endif
 #include <sys/capsicum.h>
 #include <sys/cdio.h>
 #include <sys/dvdio.h>
@@ -129,8 +132,6 @@ static struct linux_ioctl_handler socket_handler =
 { linux_ioctl_socket, LINUX_IOCTL_SOCKET_MIN, LINUX_IOCTL_SOCKET_MAX };
 static struct linux_ioctl_handler sound_handler =
 { linux_ioctl_sound, LINUX_IOCTL_SOUND_MIN, LINUX_IOCTL_SOUND_MAX };
-static struct linux_ioctl_handler termio_handler =
-{ linux_ioctl_termio, LINUX_IOCTL_TERMIO_MIN, LINUX_IOCTL_TERMIO_MAX };
 static struct linux_ioctl_handler private_handler =
 { linux_ioctl_private, LINUX_IOCTL_PRIVATE_MIN, LINUX_IOCTL_PRIVATE_MAX };
 static struct linux_ioctl_handler drm_handler =
@@ -153,7 +154,6 @@ DATA_SET(linux_ioctl_handler_set, hdio_handler);
 DATA_SET(linux_ioctl_handler_set, disk_handler);
 DATA_SET(linux_ioctl_handler_set, socket_handler);
 DATA_SET(linux_ioctl_handler_set, sound_handler);
-DATA_SET(linux_ioctl_handler_set, termio_handler);
 DATA_SET(linux_ioctl_handler_set, private_handler);
 DATA_SET(linux_ioctl_handler_set, drm_handler);
 DATA_SET(linux_ioctl_handler_set, sg_handler);
@@ -161,6 +161,14 @@ DATA_SET(linux_ioctl_handler_set, video_handler);
 DATA_SET(linux_ioctl_handler_set, video2_handler);
 DATA_SET(linux_ioctl_handler_set, fbsd_usb);
 DATA_SET(linux_ioctl_handler_set, evdev_handler);
+
+/*
+ * Keep sorted by low.
+ */
+static struct linux_ioctl_handler linux_ioctls[] = {
+	{ .func = linux_ioctl_termio, .low = LINUX_IOCTL_TERMIO_MIN,
+	    .high = LINUX_IOCTL_TERMIO_MAX },
+};
 
 #ifdef __i386__
 static TAILQ_HEAD(, linux_ioctl_handler_element) linux_ioctl_handlers =
@@ -278,6 +286,7 @@ linux_ioctl_disk(struct thread *td, struct linux_ioctl_args *args)
 	struct file *fp;
 	int error;
 	u_int sectorsize;
+	uint64_t blksize64;
 	off_t mediasize;
 
 	error = fget(td, args->fd, &cap_ioctl_rights, &fp);
@@ -300,6 +309,15 @@ linux_ioctl_disk(struct thread *td, struct linux_ioctl_args *args)
 		return (copyout(&sectorsize, (void *)args->arg,
 		    sizeof(sectorsize)));
 		break;
+	case LINUX_BLKGETSIZE64:
+		error = fo_ioctl(fp, DIOCGMEDIASIZE,
+		    (caddr_t)&mediasize, td->td_ucred, td);
+		fdrop(fp, td);
+		if (error)
+			return (error);
+		blksize64 = mediasize;;
+		return (copyout(&blksize64, (void *)args->arg,
+		    sizeof(blksize64)));
 	case LINUX_BLKSSZGET:
 		error = fo_ioctl(fp, DIOCGSECTORSIZE,
 		    (caddr_t)&sectorsize, td->td_ucred, td);
@@ -500,6 +518,8 @@ bsd_to_linux_termios(struct termios *bios, struct linux_termios *lios)
 	lios->c_cc[LINUX_VDISCARD] = bios->c_cc[VDISCARD];
 	lios->c_cc[LINUX_VWERASE] = bios->c_cc[VWERASE];
 	lios->c_cc[LINUX_VLNEXT] = bios->c_cc[VLNEXT];
+	if (linux_preserve_vstatus)
+		lios->c_cc[LINUX_VSTATUS] = bios->c_cc[VSTATUS];
 
 	for (i=0; i<LINUX_NCCS; i++) {
 		if (i != LINUX_VMIN && i != LINUX_VTIME &&
@@ -614,6 +634,8 @@ linux_to_bsd_termios(struct linux_termios *lios, struct termios *bios)
 	bios->c_cc[VDISCARD] = lios->c_cc[LINUX_VDISCARD];
 	bios->c_cc[VWERASE] = lios->c_cc[LINUX_VWERASE];
 	bios->c_cc[VLNEXT] = lios->c_cc[LINUX_VLNEXT];
+	if (linux_preserve_vstatus)
+		bios->c_cc[VSTATUS] = lios->c_cc[LINUX_VSTATUS];
 
 	for (i=0; i<NCCS; i++) {
 		if (i != VMIN && i != VTIME &&
@@ -1489,16 +1511,26 @@ linux_ioctl_cdrom(struct thread *td, struct linux_ioctl_args *args)
 		struct ioc_read_subchannel bsdsc;
 		struct cd_sub_channel_info bsdinfo;
 
+		error = copyin((void *)args->arg, &sc, sizeof(sc));
+		if (error)
+			break;
+
+		/*
+		 * Invoke the native ioctl and bounce the returned data through
+		 * the userspace buffer.  This works because the Linux structure
+		 * is the same size as our structures for the subchannel header
+		 * and position data.
+		 */
 		bsdsc.address_format = CD_LBA_FORMAT;
 		bsdsc.data_format = CD_CURRENT_POSITION;
 		bsdsc.track = 0;
-		bsdsc.data_len = sizeof(bsdinfo);
-		bsdsc.data = &bsdinfo;
-		error = fo_ioctl(fp, CDIOCREADSUBCHANNEL_SYSSPACE,
-		    (caddr_t)&bsdsc, td->td_ucred, td);
+		bsdsc.data_len = sizeof(sc);
+		bsdsc.data = (void *)args->arg;
+		error = fo_ioctl(fp, CDIOCREADSUBCHANNEL, (caddr_t)&bsdsc,
+		    td->td_ucred, td);
 		if (error)
 			break;
-		error = copyin((void *)args->arg, &sc, sizeof(sc));
+		error = copyin((void *)args->arg, &bsdinfo, sizeof(bsdinfo));
 		if (error)
 			break;
 		sc.cdsc_audiostatus = bsdinfo.header.audio_status;
@@ -2519,12 +2551,6 @@ linux_ioctl_drm(struct thread *td, struct linux_ioctl_args *args)
 }
 
 #ifdef COMPAT_LINUX32
-#define CP(src,dst,fld) do { (dst).fld = (src).fld; } while (0)
-#define PTRIN_CP(src,dst,fld) \
-	do { (dst).fld = PTRIN((src).fld); } while (0)
-#define PTROUT_CP(src,dst,fld) \
-	do { (dst).fld = PTROUT((src).fld); } while (0)
-
 static int
 linux_ioctl_sg_io(struct thread *td, struct linux_ioctl_args *args)
 {
@@ -3464,6 +3490,9 @@ linux_ioctl_fbsd_usb(struct thread *td, struct linux_ioctl_args *args)
 	case FBSD_LUSB_GET_POWER_USAGE:
 		args->cmd = USB_GET_POWER_USAGE;
 		break;
+	case FBSD_LUSB_DEVICESTATS:
+		args->cmd = USB_DEVICESTATS;
+		break;
 	default:
 		error = ENOIOCTL;
 	}
@@ -3534,8 +3563,8 @@ linux_ioctl_evdev(struct thread *td, struct linux_ioctl_args *args)
  * main ioctl syscall function
  */
 
-int
-linux_ioctl(struct thread *td, struct linux_ioctl_args *args)
+static int
+linux_ioctl_fallback(struct thread *td, struct linux_ioctl_args *args)
 {
 	struct file *fp;
 	struct linux_ioctl_handler_element *he;
@@ -3583,6 +3612,7 @@ linux_ioctl(struct thread *td, struct linux_ioctl_args *args)
 
 	switch (args->cmd & 0xffff) {
 	case LINUX_BTRFS_IOC_CLONE:
+	case LINUX_FS_IOC_FIEMAP:
 		return (ENOTSUP);
 
 	default:
@@ -3593,6 +3623,35 @@ linux_ioctl(struct thread *td, struct linux_ioctl_args *args)
 	}
 
 	return (EINVAL);
+}
+
+int
+linux_ioctl(struct thread *td, struct linux_ioctl_args *args)
+{
+	struct linux_ioctl_handler *handler;
+	int error, cmd, i;
+
+	cmd = args->cmd & 0xffff;
+
+	/*
+	 * array of ioctls known at compilation time. Elides a lot of work on
+	 * each call compared to the list variant. Everything frequently used
+	 * should be moved here.
+	 *
+	 * Arguably the magic creating the list should create an array instead.
+	 *
+	 * For now just a linear scan.
+	 */
+	for (i = 0; i < nitems(linux_ioctls); i++) {
+		handler = &linux_ioctls[i];
+		if (cmd >= handler->low && cmd <= handler->high) {
+			error = (*handler->func)(td, args);
+			if (error != ENOIOCTL) {
+				return (error);
+			}
+		}
+	}
+	return (linux_ioctl_fallback(td, args));
 }
 
 int

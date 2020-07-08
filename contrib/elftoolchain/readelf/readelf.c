@@ -26,8 +26,10 @@
 
 #include <sys/param.h>
 #include <sys/queue.h>
+
 #include <ar.h>
 #include <assert.h>
+#include <capsicum_helpers.h>
 #include <ctype.h>
 #include <dwarf.h>
 #include <err.h>
@@ -45,9 +47,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <libcasper.h>
+#include <casper/cap_fileargs.h>
+
 #include "_elftc.h"
 
-ELFTC_VCSID("$Id: readelf.c 3649 2018-11-24 03:26:23Z emaste $");
+ELFTC_VCSID("$Id: readelf.c 3769 2019-06-29 15:15:02Z emaste $");
 
 /* Backwards compatability for older FreeBSD releases. */
 #ifndef	STB_GNU_UNIQUE
@@ -215,12 +220,12 @@ struct eflags_desc {
 	const char *desc;
 };
 
-struct mips_option {
+struct flag_desc {
 	uint64_t flag;
 	const char *desc;
 };
 
-struct flag_desc {
+struct mips_option {
 	uint64_t flag;
 	const char *desc;
 };
@@ -322,11 +327,13 @@ static void dump_mips_specific_info(struct readelf *re);
 static void dump_notes(struct readelf *re);
 static void dump_notes_content(struct readelf *re, const char *buf, size_t sz,
     off_t off);
-static void dump_notes_data(const char *name, uint32_t type, const char *buf,
-    size_t sz);
+static void dump_notes_data(struct readelf *re, const char *name,
+    uint32_t type, const char *buf, size_t sz);
 static void dump_svr4_hash(struct section *s);
 static void dump_svr4_hash64(struct readelf *re, struct section *s);
 static void dump_gnu_hash(struct readelf *re, struct section *s);
+static void dump_gnu_property_type_0(struct readelf *re, const char *buf,
+    size_t sz);
 static void dump_hash(struct readelf *re);
 static void dump_phdr(struct readelf *re);
 static void dump_ppc_attributes(uint8_t *p, uint8_t *pe);
@@ -428,6 +435,13 @@ static struct eflags_desc powerpc_eflags_desc[] = {
 	{EF_PPC_EMB, "emb"},
 	{EF_PPC_RELOCATABLE, "relocatable"},
 	{EF_PPC_RELOCATABLE_LIB, "relocatable-lib"},
+	{0, NULL}
+};
+
+static struct eflags_desc riscv_eflags_desc[] = {
+	{EF_RISCV_RVC, "RVC"},
+	{EF_RISCV_RVE, "RVE"},
+	{EF_RISCV_TSO, "TSO"},
 	{0, NULL}
 };
 
@@ -674,6 +688,9 @@ phdr_type(unsigned int mach, unsigned int ptype)
 	case PT_GNU_EH_FRAME: return "GNU_EH_FRAME";
 	case PT_GNU_STACK: return "GNU_STACK";
 	case PT_GNU_RELRO: return "GNU_RELRO";
+	case PT_OPENBSD_RANDOMIZE: return "OPENBSD_RANDOMIZE";
+	case PT_OPENBSD_WXNEEDED: return "OPENBSD_WXNEEDED";
+	case PT_OPENBSD_BOOTDATA: return "OPENBSD_BOOTDATA";
 	default:
 		if (ptype >= PT_LOOS && ptype <= PT_HIOS)
 			snprintf(s_ptype, sizeof(s_ptype), "LOOS+%#x",
@@ -1163,6 +1180,8 @@ note_type_freebsd_core(unsigned int nt)
 	case 15: return "NT_PROCSTAT_PSSTRINGS";
 	case 16: return "NT_PROCSTAT_AUXV";
 	case 17: return "NT_PTLWPINFO";
+	case 0x100: return "NT_PPC_VMX (ppc Altivec registers)";
+	case 0x102: return "NT_PPC_VSX (ppc VSX registers)";
 	case 0x202: return "NT_X86_XSTATE (x86 XSAVE extended state)";
 	case 0x400: return "NT_ARM_VFP (arm VFP registers)";
 	default: return (note_type_unknown(nt));
@@ -1264,6 +1283,7 @@ note_type_xen(unsigned int nt)
 	case 15: return "XEN_ELFNOTE_INIT_P2M";
 	case 16: return "XEN_ELFNOTE_MOD_START_PFN";
 	case 17: return "XEN_ELFNOTE_SUPPORTED_FEATURES";
+	case 18: return "XEN_ELFNOTE_PHYS32_ENTRY";
 	default: return (note_type_unknown(nt));
 	}
 }
@@ -2070,6 +2090,74 @@ dwarf_reg(unsigned int mach, unsigned int reg)
 		case 49: return "ldtr";
 		default: return (NULL);
 		}
+	case EM_RISCV:
+		switch (reg) {
+		case 0: return "zero";
+		case 1: return "ra";
+		case 2: return "sp";
+		case 3: return "gp";
+		case 4: return "tp";
+		case 5: return "t0";
+		case 6: return "t1";
+		case 7: return "t2";
+		case 8: return "s0";
+		case 9: return "s1";
+		case 10: return "a0";
+		case 11: return "a1";
+		case 12: return "a2";
+		case 13: return "a3";
+		case 14: return "a4";
+		case 15: return "a5";
+		case 16: return "a6";
+		case 17: return "a7";
+		case 18: return "s2";
+		case 19: return "s3";
+		case 20: return "s4";
+		case 21: return "s5";
+		case 22: return "s6";
+		case 23: return "s7";
+		case 24: return "s8";
+		case 25: return "s9";
+		case 26: return "s10";
+		case 27: return "s11";
+		case 28: return "t3";
+		case 29: return "t4";
+		case 30: return "t5";
+		case 31: return "t6";
+		case 32: return "ft0";
+		case 33: return "ft1";
+		case 34: return "ft2";
+		case 35: return "ft3";
+		case 36: return "ft4";
+		case 37: return "ft5";
+		case 38: return "ft6";
+		case 39: return "ft7";
+		case 40: return "fs0";
+		case 41: return "fs1";
+		case 42: return "fa0";
+		case 43: return "fa1";
+		case 44: return "fa2";
+		case 45: return "fa3";
+		case 46: return "fa4";
+		case 47: return "fa5";
+		case 48: return "fa6";
+		case 49: return "fa7";
+		case 50: return "fs2";
+		case 51: return "fs3";
+		case 52: return "fs4";
+		case 53: return "fs5";
+		case 54: return "fs6";
+		case 55: return "fs7";
+		case 56: return "fs8";
+		case 57: return "fs9";
+		case 58: return "fs10";
+		case 59: return "fs11";
+		case 60: return "ft8";
+		case 61: return "ft9";
+		case 62: return "ft10";
+		case 63: return "ft11";
+		default: return (NULL);
+		}
 	case EM_X86_64:
 		switch (reg) {
 		case 0: return "rax";
@@ -2287,9 +2375,33 @@ dump_eflags(struct readelf *re, uint64_t e_flags)
 		}
 		edesc = mips_eflags_desc;
 		break;
-	case EM_PPC:
 	case EM_PPC64:
+		switch (e_flags) {
+		case 0: printf(", Unspecified or Power ELF V1 ABI"); break;
+		case 1: printf(", Power ELF V1 ABI"); break;
+		case 2: printf(", OpenPOWER ELF V2 ABI"); break;
+		default: break;
+		}
+		/* FALLTHROUGH */
+	case EM_PPC:
 		edesc = powerpc_eflags_desc;
+		break;
+	case EM_RISCV:
+		switch (e_flags & EF_RISCV_FLOAT_ABI_MASK) {
+		case EF_RISCV_FLOAT_ABI_SOFT:
+			printf(", soft-float ABI");
+			break;
+		case EF_RISCV_FLOAT_ABI_SINGLE:
+			printf(", single-float ABI");
+			break;
+		case EF_RISCV_FLOAT_ABI_DOUBLE:
+			printf(", double-float ABI");
+			break;
+		case EF_RISCV_FLOAT_ABI_QUAD:
+			printf(", quad-float ABI");
+			break;
+		}
+		edesc = riscv_eflags_desc;
 		break;
 	case EM_SPARC:
 	case EM_SPARC32PLUS:
@@ -2789,6 +2901,9 @@ static struct flag_desc dt_flags_1[] = {
 	{ 0x400000,		"NORELOC" },
 	{ 0x800000,		"SYMINTPOSE" },
 	{ 0x1000000,		"GLOBAUDIT" },
+	{ 0x02000000,		"SINGLETON" },
+	{ 0x04000000,		"STUB" },
+	{ DF_1_PIE,		"PIE" },
 	{ 0, NULL }
 };
 
@@ -3415,6 +3530,62 @@ dump_gnu_hash(struct readelf *re, struct section *s)
 	free(bl);
 }
 
+static struct flag_desc gnu_property_x86_feature_1_and_bits[] = {
+	{ GNU_PROPERTY_X86_FEATURE_1_IBT,	"IBT" },
+	{ GNU_PROPERTY_X86_FEATURE_1_SHSTK,	"SHSTK" },
+	{ 0, NULL }
+};
+
+static void
+dump_gnu_property_type_0(struct readelf *re, const char *buf, size_t sz)
+{
+	size_t i;
+	uint32_t type, prop_sz;
+
+	printf("      Properties: ");
+	while (sz > 0) {
+		if (sz < 8)
+			goto bad;
+
+		type = *(const uint32_t *)(const void *)buf;
+		prop_sz = *(const uint32_t *)(const void *)(buf + 4);
+		buf += 8;
+		sz -= 8;
+
+		if (prop_sz > sz)
+			goto bad;
+
+		if (type >= GNU_PROPERTY_LOPROC &&
+		    type <= GNU_PROPERTY_HIPROC) {
+			if (re->ehdr.e_machine != EM_X86_64) {
+				printf("machine type %x unknown\n",
+				    re->ehdr.e_machine);
+				goto unknown;
+			}
+			switch (type) {
+			case GNU_PROPERTY_X86_FEATURE_1_AND:
+				printf("x86 features:");
+				if (prop_sz != 4)
+					goto bad;
+				dump_flags(gnu_property_x86_feature_1_and_bits,
+				    *(const uint32_t *)(const void *)buf);
+				break;
+			}
+		}
+
+		buf += roundup2(prop_sz, 8);
+		sz -= roundup2(prop_sz, 8);
+	}
+	return;
+bad:
+	printf("corrupt GNU property\n");
+unknown:
+	printf("remaining description data:");
+	for (i = 0; i < sz; i++)
+		printf(" %02x", (unsigned char)buf[i]);
+	printf("\n");
+}
+
 static void
 dump_hash(struct readelf *re)
 {
@@ -3502,12 +3673,51 @@ dump_notes(struct readelf *re)
 
 static struct flag_desc note_feature_ctl_flags[] = {
 	{ NT_FREEBSD_FCTL_ASLR_DISABLE,		"ASLR_DISABLE" },
+	{ NT_FREEBSD_FCTL_PROTMAX_DISABLE,	"PROTMAX_DISABLE" },
+	{ NT_FREEBSD_FCTL_STKGAP_DISABLE,	"STKGAP_DISABLE" },
+	{ NT_FREEBSD_FCTL_WXNEEDED,		"WXNEEDED" },
 	{ 0, NULL }
 };
 
-static void
-dump_notes_data(const char *name, uint32_t type, const char *buf, size_t sz)
+static bool
+dump_note_string(const char *description, const char *s, size_t len)
 {
+	size_t i;
+
+	if (len == 0 || s[--len] != '\0') {
+		return (false);
+	} else {
+		for (i = 0; i < len; i++)
+			if (!isprint(s[i]))
+				return (false);
+	}
+
+	printf("   %s: %s\n", description, s);
+	return (true);
+}
+
+struct note_desc {
+	uint32_t type;
+	const char *description;
+	bool (*fp)(const char *, const char *, size_t);
+};
+
+static struct note_desc xen_notes[] = {
+	{ 5, "Xen version", dump_note_string },
+	{ 6, "Guest OS", dump_note_string },
+	{ 7, "Guest version", dump_note_string },
+	{ 8, "Loader", dump_note_string },
+	{ 9, "PAE mode", dump_note_string },
+	{ 10, "Features", dump_note_string },
+	{ 11, "BSD symtab", dump_note_string },
+	{ 0, NULL, NULL }
+};
+
+static void
+dump_notes_data(struct readelf *re, const char *name, uint32_t type,
+    const char *buf, size_t sz)
+{
+	struct note_desc *nd;
 	size_t i;
 	const uint32_t *ubuf;
 
@@ -3538,6 +3748,27 @@ dump_notes_data(const char *name, uint32_t type, const char *buf, size_t sz)
 			dump_flags(note_feature_ctl_flags, ubuf[0]);
 			return;
 		}
+	} else if (strcmp(name, "GNU") == 0) {
+		switch (type) {
+		case NT_GNU_PROPERTY_TYPE_0:
+			dump_gnu_property_type_0(re, buf, sz);
+			return;
+		case NT_GNU_BUILD_ID:
+			printf("   Build ID: ");
+			for (i = 0; i < sz; i++)
+				printf("%02x", (unsigned char)buf[i]);
+			printf("\n");
+			return;
+		}
+	} else if (strcmp(name, "Xen") == 0) {
+		for (nd = xen_notes; nd->description != NULL; nd++) {
+			if (nd->type == type) {
+				if (nd->fp(nd->description, buf, sz))
+					return;
+				else
+					break;
+			}
+		}
 	}
 unknown:
 	printf("   description data:");
@@ -3551,6 +3782,7 @@ dump_notes_content(struct readelf *re, const char *buf, size_t sz, off_t off)
 {
 	Elf_Note *note;
 	const char *end, *name;
+	uint32_t namesz, descsz;
 
 	printf("\nNotes at offset %#010jx with length %#010jx:\n",
 	    (uintmax_t) off, (uintmax_t) sz);
@@ -3562,9 +3794,16 @@ dump_notes_content(struct readelf *re, const char *buf, size_t sz, off_t off)
 			return;
 		}
 		note = (Elf_Note *)(uintptr_t) buf;
+		namesz = roundup2(note->n_namesz, 4);
+		descsz = roundup2(note->n_descsz, 4);
+		if (namesz < note->n_namesz || descsz < note->n_descsz ||
+		    buf + namesz + descsz > end) {
+			warnx("invalid note header");
+			return;
+		}
 		buf += sizeof(Elf_Note);
 		name = buf;
-		buf += roundup2(note->n_namesz, 4);
+		buf += namesz;
 		/*
 		 * The name field is required to be nul-terminated, and
 		 * n_namesz includes the terminating nul in observed
@@ -3582,8 +3821,8 @@ dump_notes_content(struct readelf *re, const char *buf, size_t sz, off_t off)
 		printf("  %-13s %#010jx", name, (uintmax_t) note->n_descsz);
 		printf("      %s\n", note_type(name, re->ehdr.e_type,
 		    note->n_type));
-		dump_notes_data(name, note->n_type, buf, note->n_descsz);
-		buf += roundup2(note->n_descsz, 4);
+		dump_notes_data(re, name, note->n_type, buf, note->n_descsz);
+		buf += descsz;
 	}
 }
 
@@ -5790,6 +6029,7 @@ dump_dwarf_frame_regtable(struct readelf *re, Dwarf_Fde fde, Dwarf_Addr pc,
 	for (; cur_pc < end_pc; cur_pc++) {
 		if (dwarf_get_fde_info_for_all_regs(fde, cur_pc, &rt, &row_pc,
 		    &de) != DW_DLV_OK) {
+			free(vec);
 			warnx("dwarf_get_fde_info_for_all_regs failed: %s\n",
 			    dwarf_errmsg(de));
 			return (-1);
@@ -5821,6 +6061,7 @@ dump_dwarf_frame_regtable(struct readelf *re, Dwarf_Fde fde, Dwarf_Addr pc,
 	for (; cur_pc < end_pc; cur_pc++) {
 		if (dwarf_get_fde_info_for_all_regs(fde, cur_pc, &rt, &row_pc,
 		    &de) != DW_DLV_OK) {
+			free(vec);
 			warnx("dwarf_get_fde_info_for_all_regs failed: %s\n",
 			    dwarf_errmsg(de));
 			return (-1);
@@ -6124,8 +6365,8 @@ search_loclist_at(struct readelf *re, Dwarf_Die die, Dwarf_Unsigned lowpc,
 		if (*la_list_cap == *la_list_len) {
 			*la_list = realloc(*la_list,
 			    *la_list_cap * 2 * sizeof(**la_list));
-			if (la_list == NULL)
-				errx(EXIT_FAILURE, "realloc failed");
+			if (*la_list == NULL)
+				err(EXIT_FAILURE, "realloc failed");
 			*la_list_cap *= 2;
 		}
 		la = &((*la_list)[*la_list_len]);
@@ -7012,6 +7253,7 @@ dump_ar(struct readelf *re, int fd)
 				}
 				printf("Binary %s(%s) contains:\n",
 				    re->filename, arhdr->ar_name);
+				elf_end(e);
 			}
 			printf("\t%s\n", arsym[i].as_name);
 		}
@@ -7047,27 +7289,20 @@ process_members:
 }
 
 static void
-dump_object(struct readelf *re)
+dump_object(struct readelf *re, int fd)
 {
-	int fd;
-
-	if ((fd = open(re->filename, O_RDONLY)) == -1) {
-		warn("open %s failed", re->filename);
-		return;
-	}
-
 	if ((re->flags & DISPLAY_FILENAME) != 0)
 		printf("\nFile: %s\n", re->filename);
 
 	if ((re->elf = elf_begin(fd, ELF_C_READ, NULL)) == NULL) {
 		warnx("elf_begin() failed: %s", elf_errmsg(-1));
-		return;
+		goto done;
 	}
 
 	switch (elf_kind(re->elf)) {
 	case ELF_K_NONE:
 		warnx("Not an ELF file.");
-		return;
+		goto done;
 	case ELF_K_ELF:
 		dump_elf(re);
 		break;
@@ -7076,9 +7311,9 @@ dump_object(struct readelf *re)
 		break;
 	default:
 		warnx("Internal: libelf returned unknown elf kind.");
-		return;
 	}
 
+done:
 	elf_end(re->elf);
 }
 
@@ -7422,9 +7657,11 @@ readelf_usage(int status)
 int
 main(int argc, char **argv)
 {
+	cap_rights_t	rights;
+	fileargs_t	*fa;
 	struct readelf	*re, re_storage;
 	unsigned long	 si;
-	int		 opt, i;
+	int		 fd, opt, i;
 	char		*ep;
 
 	re = &re_storage;
@@ -7500,7 +7737,7 @@ main(int argc, char **argv)
 			re->options |= RE_S;
 			break;
 		case 't':
-			re->options |= RE_T;
+			re->options |= RE_SS | RE_T;
 			break;
 		case 'u':
 			re->options |= RE_U;
@@ -7547,9 +7784,30 @@ main(int argc, char **argv)
 		errx(EXIT_FAILURE, "ELF library initialization failed: %s",
 		    elf_errmsg(-1));
 
+	cap_rights_init(&rights, CAP_FCNTL, CAP_FSTAT, CAP_MMAP_R, CAP_SEEK);
+	fa = fileargs_init(argc, argv, O_RDONLY, 0, &rights, FA_OPEN);
+	if (fa == NULL)
+		err(1, "Unable to initialize casper fileargs");
+
+	caph_cache_catpages();
+	if (caph_limit_stdio() < 0) {
+		fileargs_free(fa);
+		err(1, "Unable to limit stdio rights");
+	}
+	if (caph_enter_casper() < 0) {
+		fileargs_free(fa);
+		err(1, "Unable to enter capability mode");
+	}
+
 	for (i = 0; i < argc; i++) {
 		re->filename = argv[i];
-		dump_object(re);
+		fd = fileargs_open(fa, re->filename);
+		if (fd < 0) {
+			warn("open %s failed", re->filename);
+		} else {
+			dump_object(re, fd);
+			close(fd);
+		}
 	}
 
 	exit(EXIT_SUCCESS);

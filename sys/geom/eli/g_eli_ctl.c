@@ -46,6 +46,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/uma.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/eli/g_eli.h>
 
 
@@ -135,6 +136,11 @@ g_eli_ctl_attach(struct gctl_req *req, struct g_class *mp)
 	if (md.md_keys == 0x00) {
 		explicit_bzero(&md, sizeof(md));
 		gctl_error(req, "No valid keys on %s.", pp->name);
+		return;
+	}
+	if (!eli_metadata_crypto_supported(&md)) {
+		explicit_bzero(&md, sizeof(md));
+		gctl_error(req, "Invalid or unsupported algorithms.");
 		return;
 	}
 
@@ -649,8 +655,7 @@ g_eli_ctl_configure(struct gctl_req *req, struct g_class *mp)
 			    prov, error);
 		}
 		explicit_bzero(&md, sizeof(md));
-		explicit_bzero(sector, pp->sectorsize);
-		free(sector, M_ELI);
+		zfree(sector, M_ELI);
 	}
 }
 
@@ -753,8 +758,7 @@ g_eli_ctl_setkey(struct gctl_req *req, struct g_class *mp)
 	explicit_bzero(&md, sizeof(md));
 	error = g_write_data(cp, pp->mediasize - pp->sectorsize, sector,
 	    pp->sectorsize);
-	explicit_bzero(sector, pp->sectorsize);
-	free(sector, M_ELI);
+	zfree(sector, M_ELI);
 	if (error != 0) {
 		gctl_error(req, "Cannot store metadata on %s (error=%d).",
 		    pp->name, error);
@@ -869,8 +873,7 @@ g_eli_ctl_delkey(struct gctl_req *req, struct g_class *mp)
 		(void)g_io_flush(cp);
 	}
 	explicit_bzero(&md, sizeof(md));
-	explicit_bzero(sector, pp->sectorsize);
-	free(sector, M_ELI);
+	zfree(sector, M_ELI);
 	if (*all)
 		G_ELI_DEBUG(1, "All keys removed from %s.", pp->name);
 	else

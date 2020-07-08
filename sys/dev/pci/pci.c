@@ -35,17 +35,18 @@ __FBSDID("$FreeBSD$");
 #include "opt_bus.h"
 
 #include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/malloc.h>
-#include <sys/module.h>
+#include <sys/conf.h>
+#include <sys/endian.h>
+#include <sys/eventhandler.h>
+#include <sys/fcntl.h>
+#include <sys/kernel.h>
 #include <sys/limits.h>
 #include <sys/linker.h>
-#include <sys/fcntl.h>
-#include <sys/conf.h>
-#include <sys/kernel.h>
+#include <sys/malloc.h>
+#include <sys/module.h>
 #include <sys/queue.h>
 #include <sys/sysctl.h>
-#include <sys/endian.h>
+#include <sys/systm.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -99,8 +100,6 @@ static void		pci_assign_interrupt(device_t bus, device_t dev,
 static int		pci_add_map(device_t bus, device_t dev, int reg,
 			    struct resource_list *rl, int force, int prefetch);
 static int		pci_probe(device_t dev);
-static int		pci_attach(device_t dev);
-static int		pci_detach(device_t dev);
 static void		pci_load_vendor_data(void);
 static int		pci_describe_parse_line(char **ptr, int *vendor,
 			    int *device, char **desc);
@@ -276,13 +275,6 @@ static const struct pci_quirk pci_quirks[] = {
 	{ 0x74501022, PCI_QUIRK_DISABLE_MSI,	0,	0 },
 
 	/*
-	 * MSI-X allocation doesn't work properly for devices passed through
-	 * by VMware up to at least ESXi 5.1.
-	 */
-	{ 0x079015ad, PCI_QUIRK_DISABLE_MSIX,	0,	0 }, /* PCI/PCI-X */
-	{ 0x07a015ad, PCI_QUIRK_DISABLE_MSIX,	0,	0 }, /* PCIe */
-
-	/*
 	 * Some virtualization environments emulate an older chipset
 	 * but support MSI just fine.  QEMU uses the Intel 82440.
 	 */
@@ -340,7 +332,8 @@ uint32_t pci_numdevs = 0;
 static int pcie_chipset, pcix_chipset;
 
 /* sysctl vars */
-SYSCTL_NODE(_hw, OID_AUTO, pci, CTLFLAG_RD, 0, "PCI bus tuning parameters");
+SYSCTL_NODE(_hw, OID_AUTO, pci, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "PCI bus tuning parameters");
 
 static int pci_enable_io_modes = 1;
 SYSCTL_INT(_hw_pci, OID_AUTO, enable_io_modes, CTLFLAG_RWTUN,
@@ -415,6 +408,10 @@ static int pci_enable_ari = 1;
 SYSCTL_INT(_hw_pci, OID_AUTO, enable_ari, CTLFLAG_RDTUN, &pci_enable_ari,
     0, "Enable support for PCIe Alternative RID Interpretation");
 
+int pci_enable_aspm;
+SYSCTL_INT(_hw_pci, OID_AUTO, enable_aspm, CTLFLAG_RDTUN, &pci_enable_aspm,
+    0, "Enable support for PCIe Active State Power Management");
+
 static int pci_clear_aer_on_attach = 0;
 SYSCTL_INT(_hw_pci, OID_AUTO, clear_aer_on_attach, CTLFLAG_RWTUN,
     &pci_clear_aer_on_attach, 0,
@@ -446,18 +443,18 @@ pci_find_bsf(uint8_t bus, uint8_t slot, uint8_t func)
 device_t
 pci_find_dbsf(uint32_t domain, uint8_t bus, uint8_t slot, uint8_t func)
 {
-	struct pci_devinfo *dinfo;
+	struct pci_devinfo *dinfo = NULL;
 
 	STAILQ_FOREACH(dinfo, &pci_devq, pci_links) {
 		if ((dinfo->cfg.domain == domain) &&
 		    (dinfo->cfg.bus == bus) &&
 		    (dinfo->cfg.slot == slot) &&
 		    (dinfo->cfg.func == func)) {
-			return (dinfo->cfg.dev);
+			break;
 		}
 	}
 
-	return (NULL);
+	return (dinfo != NULL ? dinfo->cfg.dev : NULL);
 }
 
 /* Find a device_t by vendor/device ID */
@@ -1109,16 +1106,16 @@ pci_read_vpd(device_t pcib, pcicfgregs *cfg)
 					break;
 				}
 				remain |= byte2 << 8;
-				if (remain > (0x7f*4 - vrs.off)) {
-					state = -1;
-					pci_printf(cfg,
-					    "invalid VPD data, remain %#x\n",
-					    remain);
-				}
 				name = byte & 0x7f;
 			} else {
 				remain = byte & 0x7;
 				name = (byte >> 3) & 0xf;
+			}
+			if (vrs.off + remain - vrs.bytesinval > 0x8000) {
+				pci_printf(cfg,
+				    "VPD data overflow, remain %#x\n", remain);
+				state = -1;
+				break;
 			}
 			switch (name) {
 			case 0x2:	/* String */
@@ -1670,10 +1667,13 @@ pci_mask_msix(device_t dev, u_int index)
 	KASSERT(msix->msix_msgnum > index, ("bogus index"));
 	offset = msix->msix_table_offset + index * 16 + 12;
 	val = bus_read_4(msix->msix_table_res, offset);
-	if (!(val & PCIM_MSIX_VCTRL_MASK)) {
-		val |= PCIM_MSIX_VCTRL_MASK;
-		bus_write_4(msix->msix_table_res, offset, val);
-	}
+	val |= PCIM_MSIX_VCTRL_MASK;
+
+	/*
+	 * Some devices (e.g. Samsung PM961) do not support reads of this
+	 * register, so always write the new value.
+	 */
+	bus_write_4(msix->msix_table_res, offset, val);
 }
 
 void
@@ -1686,10 +1686,13 @@ pci_unmask_msix(device_t dev, u_int index)
 	KASSERT(msix->msix_table_len > index, ("bogus index"));
 	offset = msix->msix_table_offset + index * 16 + 12;
 	val = bus_read_4(msix->msix_table_res, offset);
-	if (val & PCIM_MSIX_VCTRL_MASK) {
-		val &= ~PCIM_MSIX_VCTRL_MASK;
-		bus_write_4(msix->msix_table_res, offset, val);
-	}
+	val &= ~PCIM_MSIX_VCTRL_MASK;
+
+	/*
+	 * Some devices (e.g. Samsung PM961) do not support reads of this
+	 * register, so always write the new value.
+	 */
+	bus_write_4(msix->msix_table_res, offset, val);
 }
 
 int
@@ -4366,7 +4369,7 @@ pci_attach_common(device_t dev)
 	return (0);
 }
 
-static int
+int
 pci_attach(device_t dev)
 {
 	int busno, domain, error;
@@ -4387,7 +4390,7 @@ pci_attach(device_t dev)
 	return (bus_generic_attach(dev));
 }
 
-static int
+int
 pci_detach(device_t dev)
 {
 #ifdef PCI_RES_BUS
@@ -5683,7 +5686,7 @@ pci_get_resource_list (device_t dev, device_t child)
 }
 
 #ifdef ACPI_DMAR
-bus_dma_tag_t dmar_get_dma_tag(device_t dev, device_t child);
+bus_dma_tag_t acpi_iommu_get_dma_tag(device_t dev, device_t child);
 bus_dma_tag_t
 pci_get_dma_tag(device_t bus, device_t dev)
 {
@@ -5691,8 +5694,8 @@ pci_get_dma_tag(device_t bus, device_t dev)
 	struct pci_softc *sc;
 
 	if (device_get_parent(dev) == bus) {
-		/* try dmar and return if it works */
-		tag = dmar_get_dma_tag(bus, dev);
+		/* try iommu and return if it works */
+		tag = acpi_iommu_get_dma_tag(bus, dev);
 	} else
 		tag = NULL;
 	if (tag == NULL) {
@@ -5933,7 +5936,6 @@ pci_cfg_restore(device_t dev, struct pci_devinfo *dinfo)
 	 */
 	if (pci_get_powerstate(dev) != PCI_POWERSTATE_D0)
 		pci_set_powerstate(dev, PCI_POWERSTATE_D0);
-	pci_write_config(dev, PCIR_COMMAND, dinfo->cfg.cmdreg, 2);
 	pci_write_config(dev, PCIR_INTLINE, dinfo->cfg.intline, 1);
 	pci_write_config(dev, PCIR_INTPIN, dinfo->cfg.intpin, 1);
 	pci_write_config(dev, PCIR_CACHELNSZ, dinfo->cfg.cachelnsz, 1);
@@ -5971,6 +5973,9 @@ pci_cfg_restore(device_t dev, struct pci_devinfo *dinfo)
 		break;
 	}
 	pci_restore_bars(dev);
+
+	if ((dinfo->cfg.hdrtype & PCIM_HDRTYPE) != PCIM_HDRTYPE_BRIDGE)
+		pci_write_config(dev, PCIR_COMMAND, dinfo->cfg.cmdreg, 2);
 
 	/*
 	 * Restore extended capabilities for PCI-Express and PCI-X

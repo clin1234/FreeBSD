@@ -851,7 +851,7 @@ ieee80211_ioctl_get80211(struct ieee80211vap *vap, u_long cmd,
 		ireq->i_val = vap->iv_rtsthreshold;
 		break;
 	case IEEE80211_IOC_PROTMODE:
-		ireq->i_val = ic->ic_protmode;
+		ireq->i_val = vap->iv_protmode;
 		break;
 	case IEEE80211_IOC_TXPOWER:
 		/*
@@ -1097,7 +1097,7 @@ ieee80211_ioctl_get80211(struct ieee80211vap *vap, u_long cmd,
 		error = ieee80211_ioctl_getdevcaps(ic, ireq);
 		break;
 	case IEEE80211_IOC_HTPROTMODE:
-		ireq->i_val = ic->ic_htprotmode;
+		ireq->i_val = vap->iv_htprotmode;
 		break;
 	case IEEE80211_IOC_HTCONF:
 		if (vap->iv_flags_ht & IEEE80211_FHT_HT) {
@@ -1144,6 +1144,11 @@ ieee80211_ioctl_get80211(struct ieee80211vap *vap, u_long cmd,
 			ireq->i_val |= 1;
 		if (vap->iv_flags_ht & IEEE80211_FHT_LDPC_RX)
 			ireq->i_val |= 2;
+		break;
+	case IEEE80211_IOC_UAPSD:
+		ireq->i_val = 0;
+		if (vap->iv_flags_ext & IEEE80211_FEXT_UAPSD)
+			ireq->i_val = 1;
 		break;
 
 	/* VHT */
@@ -2907,11 +2912,13 @@ ieee80211_ioctl_set80211(struct ieee80211vap *vap, u_long cmd, struct ieee80211r
 	case IEEE80211_IOC_PROTMODE:
 		if (ireq->i_val > IEEE80211_PROT_RTSCTS)
 			return EINVAL;
-		ic->ic_protmode = (enum ieee80211_protmode)ireq->i_val;
+		vap->iv_protmode = (enum ieee80211_protmode)ireq->i_val;
 		/* NB: if not operating in 11g this can wait */
 		if (ic->ic_bsschan != IEEE80211_CHAN_ANYC &&
 		    IEEE80211_IS_CHAN_ANYG(ic->ic_bsschan))
 			error = ERESTART;
+		/* driver callback for protection mode update */
+		ieee80211_vap_update_erp_protmode(vap);
 		break;
 	case IEEE80211_IOC_TXPOWER:
 		if ((ic->ic_caps & IEEE80211_C_TXPMGT) == 0)
@@ -3379,11 +3386,13 @@ ieee80211_ioctl_set80211(struct ieee80211vap *vap, u_long cmd, struct ieee80211r
 	case IEEE80211_IOC_HTPROTMODE:
 		if (ireq->i_val > IEEE80211_PROT_RTSCTS)
 			return EINVAL;
-		ic->ic_htprotmode = ireq->i_val ?
+		vap->iv_htprotmode = ireq->i_val ?
 		    IEEE80211_PROT_RTSCTS : IEEE80211_PROT_NONE;
 		/* NB: if not operating in 11n this can wait */
 		if (isvapht(vap))
 			error = ERESTART;
+		/* Notify driver layer of HT protmode changes */
+		ieee80211_vap_update_ht_protmode(vap);
 		break;
 	case IEEE80211_IOC_STA_VLAN:
 		error = ieee80211_ioctl_setstavlan(vap, ireq);
@@ -3461,6 +3470,16 @@ ieee80211_ioctl_set80211(struct ieee80211vap *vap, u_long cmd, struct ieee80211r
 		/* NB: reset only if we're operating on an 11n channel */
 		if (isvapht(vap))
 			error = ERESTART;
+		break;
+	case IEEE80211_IOC_UAPSD:
+		if ((vap->iv_caps & IEEE80211_C_UAPSD) == 0)
+			return EOPNOTSUPP;
+		if (ireq->i_val == 0)
+			vap->iv_flags_ext &= ~IEEE80211_FEXT_UAPSD;
+		else if (ireq->i_val == 1)
+			vap->iv_flags_ext |= IEEE80211_FEXT_UAPSD;
+		else
+			return EINVAL;
 		break;
 
 	/* VHT */
@@ -3583,6 +3602,8 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		IEEE80211_UNLOCK(ic);
 		/* Wait for parent ioctl handler if it was queued */
 		if (wait) {
+			struct epoch_tracker et;
+
 			ieee80211_waitfor_parent(ic);
 
 			/*
@@ -3592,13 +3613,13 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			 * NB: device may be detached during initialization;
 			 * use if_ioctl for existence check.
 			 */
-			if_addr_rlock(ifp);
+			NET_EPOCH_ENTER(et);
 			if (ifp->if_ioctl == ieee80211_ioctl &&
 			    (ifp->if_flags & IFF_UP) == 0 &&
 			    !IEEE80211_ADDR_EQ(vap->iv_myaddr, IF_LLADDR(ifp)))
 				IEEE80211_ADDR_COPY(vap->iv_myaddr,
 				    IF_LLADDR(ifp));
-			if_addr_runlock(ifp);
+			NET_EPOCH_EXIT(et);
 		}
 		break;
 	case SIOCADDMULTI:

@@ -338,6 +338,7 @@ static struct _s_x rule_options[] = {
 	{ "tcpdatalen",		TOK_TCPDATALEN },
 	{ "tcpflags",		TOK_TCPFLAGS },
 	{ "tcpflgs",		TOK_TCPFLAGS },
+	{ "tcpmss",		TOK_TCPMSS },
 	{ "tcpoptions",		TOK_TCPOPTS },
 	{ "tcpopts",		TOK_TCPOPTS },
 	{ "tcpseq",		TOK_TCPSEQ },
@@ -881,6 +882,7 @@ static struct _s_x _port_name[] = {
 	{"ipttl",	O_IPTTL},
 	{"mac-type",	O_MAC_TYPE},
 	{"tcpdatalen",	O_TCPDATALEN},
+	{"tcpmss",	O_TCPMSS},
 	{"tcpwin",	O_TCPWIN},
 	{"tagged",	O_TAGGED},
 	{NULL,		0}
@@ -1588,6 +1590,7 @@ print_instruction(struct buf_pr *bp, const struct format_opts *fo,
 	case O_IPTTL:
 	case O_IPLEN:
 	case O_TCPDATALEN:
+	case O_TCPMSS:
 	case O_TCPWIN:
 		if (F_LEN(cmd) == 1) {
 			switch (cmd->opcode) {
@@ -1602,6 +1605,9 @@ print_instruction(struct buf_pr *bp, const struct format_opts *fo,
 				break;
 			case O_TCPDATALEN:
 				s = "tcpdatalen";
+				break;
+			case O_TCPMSS:
+				s = "tcpmss";
 				break;
 			case O_TCPWIN:
 				s = "tcpwin";
@@ -2217,6 +2223,8 @@ show_static_rule(struct cmdline_opts *co, struct format_opts *fo,
 	}
 
 	print_proto(bp, fo, &state);
+	if (co->do_compact != 0 && (rule->flags & IPFW_RULE_NOOPT))
+		goto justopts;
 
 	/* Print source */
 	bprintf(bp, " from");
@@ -3320,13 +3328,7 @@ ipfw_delete(char *av[])
 			j = strtol(sep + 1, NULL, 10);
 		av++;
 		if (co.do_nat) {
-			exitval = do_cmd(IP_FW_NAT_DEL, &i, sizeof i);
-			if (exitval) {
-				exitval = EX_UNAVAILABLE;
-				if (co.do_quiet)
-					continue;
-				warn("nat %u not available", i);
-			}
+			exitval = ipfw_delete_nat(i);
 		} else if (co.do_pipe) {
 			exitval = ipfw_delete_pipe(co.do_pipe, i);
 		} else {
@@ -3988,8 +3990,7 @@ chkarg:
 		 *	IPv4 a.b.c.d,port
 		 *	IPv4 a.b.c.d:port
 		 *	IPv6 w:x:y::z,port
-		 * The ':' can only be used with hostname and IPv4 address.
-		 * XXX-BZ Should we also support [w:x:y::z]:port?
+		 *	IPv6 [w:x:y::z]:port
 		 */
 		struct sockaddr_storage result;
 		struct addrinfo *res;
@@ -3999,33 +4000,45 @@ chkarg:
 
 		NEED1("missing forward address[:port]");
 
-		/*
-		 * locate the address-port separator (':' or ',')
-		 */
-		s = strchr(*av, ',');
-		if (s == NULL) {
-			/* Distinguish between IPv4:port and IPv6 cases. */
-			s = strchr(*av, ':');
-			if (s && strchr(s+1, ':'))
-				s = NULL; /* no port */
-		}
-
-		port_number = 0;
-		if (s != NULL) {
-			/* Terminate host portion and set s to start of port. */
-			*(s++) = '\0';
-			i = strtoport(s, &end, 0 /* base */, 0 /* proto */);
-			if (s == end)
-				errx(EX_DATAERR,
-				    "illegal forwarding port ``%s''", s);
-			port_number = (u_short)i;
-		}
-
 		if (_substrcmp(*av, "tablearg") == 0) {
 			family = PF_INET;
 			((struct sockaddr_in*)&result)->sin_addr.s_addr =
 			    INADDR_ANY;
 		} else {
+			/*
+			 * Are we an bracket-enclosed IPv6 address?
+			 */
+			if (strchr(*av, '['))
+				(*av)++;
+
+			/*
+			 * locate the address-port separator (':' or ',')
+			 */
+			s = strchr(*av, ',');
+			if (s == NULL) {
+				s = strchr(*av, ']');
+				/* Prevent erroneous parsing on brackets. */
+				if (s != NULL)
+					*(s++) = '\0';
+				else
+					s = *av;
+
+				/* Distinguish between IPv4:port and IPv6 cases. */
+				s = strchr(s, ':');
+				if (s && strchr(s+1, ':'))
+					s = NULL; /* no port */
+			}
+
+			if (s != NULL) {
+				/* Terminate host portion and set s to start of port. */
+				*(s++) = '\0';
+				i = strtoport(s, &end, 0 /* base */, 0 /* proto */);
+				if (s == end)
+					errx(EX_DATAERR,
+					    "illegal forwarding port ``%s''", s);
+				port_number = (u_short)i;
+			}
+
 			/*
 			 * Resolve the host name or address to a family and a
 			 * network representation of the address.
@@ -4389,6 +4402,8 @@ chkarg:
 	}
     OR_BLOCK(get_proto);
 
+	first_cmd = cmd; /* update pointer to use in compact form */
+
 	/*
 	 * "from", mandatory
 	 */
@@ -4460,6 +4475,8 @@ chkarg:
 				cmd = next_cmd(cmd, &cblen);
 		}
 	}
+	if (first_cmd == cmd)
+		rule->flags |= IPFW_RULE_NOOPT;
 
 read_options:
 	prev = NULL;
@@ -4662,12 +4679,27 @@ read_options:
 		case TOK_JAIL:
 			NEED1("jail requires argument");
 		    {
+			char *end;
 			int jid;
 
 			cmd->opcode = O_JAIL;
-			jid = jail_getid(*av);
-			if (jid < 0)
-				errx(EX_DATAERR, "%s", jail_errmsg);
+			/*
+			 * If av is a number, then we'll just pass it as-is.  If
+			 * it's a name, try to resolve that to a jid.
+			 *
+			 * We save the jail_getid(3) call for a fallback because
+			 * it entails an unconditional trip to the kernel to
+			 * either validate a jid or resolve a name to a jid.
+			 * This specific token doesn't currently require a
+			 * jid to be an active jail, so we save a transition
+			 * by simply using a number that we're given.
+			 */
+			jid = strtoul(*av, &end, 10);
+			if (*end != '\0') {
+				jid = jail_getid(*av);
+				if (jid < 0)
+				    errx(EX_DATAERR, "%s", jail_errmsg);
+			}
 			cmd32->d[0] = (uint32_t)jid;
 			cmd->len |= F_INSN_SIZE(ipfw_insn_u32);
 			av++;
@@ -4709,14 +4741,18 @@ read_options:
 			av++;
 			break;
 
+		case TOK_TCPMSS:
 		case TOK_TCPWIN:
-			NEED1("tcpwin requires length");
+			NEED1("tcpmss/tcpwin requires size");
 			if (strpbrk(*av, "-,")) {
-			    if (!add_ports(cmd, *av, 0, O_TCPWIN, cblen))
-				errx(EX_DATAERR, "invalid tcpwin len %s", *av);
+				if (add_ports(cmd, *av, 0,
+				    i == TOK_TCPWIN ? O_TCPWIN : O_TCPMSS,
+				    cblen) == NULL)
+					errx(EX_DATAERR, "invalid %s size %s",
+					    s, *av);
 			} else
-			    fill_cmd(cmd, O_TCPWIN, 0,
-				    strtoul(*av, NULL, 0));
+				fill_cmd(cmd, i == TOK_TCPWIN ? O_TCPWIN :
+				    O_TCPMSS, 0, strtoul(*av, NULL, 0));
 			av++;
 			break;
 

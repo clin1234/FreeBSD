@@ -138,7 +138,10 @@ SYSCTL_INT(_hw_vmbus, OID_AUTO, pin_evttask, CTLFLAG_RDTUN,
 
 extern inthand_t IDTVEC(vmbus_isr), IDTVEC(vmbus_isr_pti);
 
+uint32_t			vmbus_current_version;
+
 static const uint32_t		vmbus_version[] = {
+	VMBUS_VERSION_WIN10,
 	VMBUS_VERSION_WIN8_1,
 	VMBUS_VERSION_WIN8,
 	VMBUS_VERSION_WIN7,
@@ -362,10 +365,46 @@ vmbus_gpadl_alloc(struct vmbus_softc *sc)
 	uint32_t gpadl;
 
 again:
-	gpadl = atomic_fetchadd_int(&sc->vmbus_gpadl, 1); 
+	gpadl = atomic_fetchadd_int(&sc->vmbus_gpadl, 1);
 	if (gpadl == 0)
 		goto again;
 	return (gpadl);
+}
+
+/* Used for Hyper-V socket when guest client connects to host */
+int
+vmbus_req_tl_connect(struct hyperv_guid *guest_srv_id,
+    struct hyperv_guid *host_srv_id)
+{
+	struct vmbus_softc *sc = vmbus_get_softc();
+	struct vmbus_chanmsg_tl_connect *req;
+	struct vmbus_msghc *mh;
+	int error;
+
+	if (!sc)
+		return ENXIO;
+
+	mh = vmbus_msghc_get(sc, sizeof(*req));
+	if (mh == NULL) {
+		device_printf(sc->vmbus_dev,
+		    "can not get msg hypercall for tl connect\n");
+		return ENXIO;
+	}
+
+	req = vmbus_msghc_dataptr(mh);
+	req->chm_hdr.chm_type = VMBUS_CHANMSG_TYPE_TL_CONN;
+	req->guest_endpoint_id = *guest_srv_id;
+	req->host_service_id = *host_srv_id;
+
+	error = vmbus_msghc_exec_noresult(mh);
+	vmbus_msghc_put(sc, mh);
+
+	if (error) {
+		device_printf(sc->vmbus_dev,
+		    "tl connect msg hypercall failed\n");
+	}
+
+	return error;
 }
 
 static int
@@ -412,6 +451,7 @@ vmbus_init(struct vmbus_softc *sc)
 
 		error = vmbus_connect(sc, vmbus_version[i]);
 		if (!error) {
+			vmbus_current_version = vmbus_version[i];
 			sc->vmbus_version = vmbus_version[i];
 			device_printf(sc->vmbus_dev, "version %u.%u\n",
 			    VMBUS_VERSION_MAJOR(sc->vmbus_version),

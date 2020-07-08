@@ -457,7 +457,7 @@ static struct domainset *
 _domainset_create(struct domainset *domain, struct domainlist *freelist)
 {
 	struct domainset *ndomain;
-	int i, j, max;
+	int i, j;
 
 	KASSERT(domain->ds_cnt <= vm_ndomains,
 	    ("invalid domain count in domainset %p", domain));
@@ -476,8 +476,7 @@ _domainset_create(struct domainset *domain, struct domainlist *freelist)
 	if (ndomain == NULL) {
 		LIST_INSERT_HEAD(&cpuset_domains, domain, ds_link);
 		domain->ds_cnt = DOMAINSET_COUNT(&domain->ds_mask);
-		max = DOMAINSET_FLS(&domain->ds_mask) + 1;
-		for (i = 0, j = 0; i < max; i++)
+		for (i = 0, j = 0; i < DOMAINSET_FLS(&domain->ds_mask); i++)
 			if (DOMAINSET_ISSET(i, &domain->ds_mask))
 				domain->ds_order[j++] = i;
 	}
@@ -500,25 +499,31 @@ _domainset_create(struct domainset *domain, struct domainlist *freelist)
 static bool
 domainset_empty_vm(struct domainset *domain)
 {
-	int i, j, max;
+	domainset_t empty;
+	int i, j;
 
-	max = DOMAINSET_FLS(&domain->ds_mask) + 1;
-	for (i = 0; i < max; i++)
-		if (DOMAINSET_ISSET(i, &domain->ds_mask) && VM_DOMAIN_EMPTY(i))
-			DOMAINSET_CLR(i, &domain->ds_mask);
+	DOMAINSET_ZERO(&empty);
+	for (i = 0; i < vm_ndomains; i++)
+		if (VM_DOMAIN_EMPTY(i))
+			DOMAINSET_SET(i, &empty);
+	if (DOMAINSET_SUBSET(&empty, &domain->ds_mask))
+		return (true);
+
+	/* Remove empty domains from the set and recompute. */
+	DOMAINSET_ANDNOT(&domain->ds_mask, &empty);
 	domain->ds_cnt = DOMAINSET_COUNT(&domain->ds_mask);
-	max = DOMAINSET_FLS(&domain->ds_mask) + 1;
-	for (i = j = 0; i < max; i++) {
+	for (i = j = 0; i < DOMAINSET_FLS(&domain->ds_mask); i++)
 		if (DOMAINSET_ISSET(i, &domain->ds_mask))
 			domain->ds_order[j++] = i;
-		else if (domain->ds_policy == DOMAINSET_POLICY_PREFER &&
-		    domain->ds_prefer == i && domain->ds_cnt > 1) {
-			domain->ds_policy = DOMAINSET_POLICY_ROUNDROBIN;
-			domain->ds_prefer = -1;
-		}
+
+	/* Convert a PREFER policy referencing an empty domain to RR. */
+	if (domain->ds_policy == DOMAINSET_POLICY_PREFER &&
+	    DOMAINSET_ISSET(domain->ds_prefer, &empty)) {
+		domain->ds_policy = DOMAINSET_POLICY_ROUNDROBIN;
+		domain->ds_prefer = -1;
 	}
 
-	return (DOMAINSET_EMPTY(&domain->ds_mask));
+	return (false);
 }
 
 /*
@@ -791,7 +796,7 @@ cpuset_modify_domain(struct cpuset *set, struct domainset *domain)
 		/*
 		 * Verify that we have access to this set of domains.
 		 */
-		if (root && !domainset_valid(dset, domain)) {
+		if (!domainset_valid(dset, domain)) {
 			error = EINVAL;
 			goto out;
 		}
@@ -1502,7 +1507,7 @@ cpuset_thread0(void)
 	/*
 	 * Initialize the unit allocator. 0 and 1 are allocated above.
 	 */
-	cpuset_unr = new_unrhdr(2, INT_MAX, NULL);
+	cpuset_unr = new_unrhdr(3, INT_MAX, NULL);
 
 	/*
 	 * If MD code has not initialized per-domain cpusets, place all
@@ -1574,6 +1579,27 @@ cpuset_setproc_update_set(struct proc *p, struct cpuset *set)
 	if (error)
 		return (error);
 	cpuset_rel(set);
+	return (0);
+}
+
+/*
+ * In Capability mode, the only accesses that are permitted are to the current
+ * thread and process' CPU and domain sets.
+ */
+static int
+cpuset_check_capabilities(struct thread *td, cpulevel_t level, cpuwhich_t which,
+    id_t id)
+{
+	if (IN_CAPABILITY_MODE(td)) {
+		if (level != CPU_LEVEL_WHICH)
+			return (ECAPMODE);
+		if (which != CPU_WHICH_TID && which != CPU_WHICH_PID)
+			return (ECAPMODE);
+		if (id != -1 &&
+		    !(which == CPU_WHICH_TID && id == td->td_tid) &&
+		    !(which == CPU_WHICH_PID && id == td->td_proc->p_pid))
+			return (ECAPMODE);
+	}
 	return (0);
 }
 
@@ -1734,15 +1760,9 @@ kern_cpuset_getaffinity(struct thread *td, cpulevel_t level, cpuwhich_t which,
 
 	if (cpusetsize < sizeof(cpuset_t) || cpusetsize > CPU_MAXSIZE / NBBY)
 		return (ERANGE);
-	/* In Capability mode, you can only get your own CPU set. */
-	if (IN_CAPABILITY_MODE(td)) {
-		if (level != CPU_LEVEL_WHICH)
-			return (ECAPMODE);
-		if (which != CPU_WHICH_TID && which != CPU_WHICH_PID)
-			return (ECAPMODE);
-		if (id != -1)
-			return (ECAPMODE);
-	}
+	error = cpuset_check_capabilities(td, level, which, id);
+	if (error != 0)
+		return (error);
 	size = cpusetsize;
 	mask = malloc(size, M_TEMP, M_WAITOK | M_ZERO);
 	error = cpuset_which(which, id, &p, &ttd, &set);
@@ -1851,15 +1871,9 @@ kern_cpuset_setaffinity(struct thread *td, cpulevel_t level, cpuwhich_t which,
 
 	if (cpusetsize < sizeof(cpuset_t) || cpusetsize > CPU_MAXSIZE / NBBY)
 		return (ERANGE);
-	/* In Capability mode, you can only set your own CPU set. */
-	if (IN_CAPABILITY_MODE(td)) {
-		if (level != CPU_LEVEL_WHICH)
-			return (ECAPMODE);
-		if (which != CPU_WHICH_TID && which != CPU_WHICH_PID)
-			return (ECAPMODE);
-		if (id != -1)
-			return (ECAPMODE);
-	}
+	error = cpuset_check_capabilities(td, level, which, id);
+	if (error != 0)
+		return (error);
 	mask = malloc(cpusetsize, M_TEMP, M_WAITOK | M_ZERO);
 	error = copyin(maskp, mask, cpusetsize);
 	if (error)
@@ -1982,15 +1996,9 @@ kern_cpuset_getdomain(struct thread *td, cpulevel_t level, cpuwhich_t which,
 	if (domainsetsize < sizeof(domainset_t) ||
 	    domainsetsize > DOMAINSET_MAXSIZE / NBBY)
 		return (ERANGE);
-	/* In Capability mode, you can only get your own domain set. */
-	if (IN_CAPABILITY_MODE(td)) {
-		if (level != CPU_LEVEL_WHICH)
-			return (ECAPMODE);
-		if (which != CPU_WHICH_TID && which != CPU_WHICH_PID)
-			return (ECAPMODE);
-		if (id != -1)
-			return (ECAPMODE);
-	}
+	error = cpuset_check_capabilities(td, level, which, id);
+	if (error != 0)
+		return (error);
 	mask = malloc(domainsetsize, M_TEMP, M_WAITOK | M_ZERO);
 	bzero(&outset, sizeof(outset));
 	error = cpuset_which(which, id, &p, &ttd, &set);
@@ -2117,15 +2125,9 @@ kern_cpuset_setdomain(struct thread *td, cpulevel_t level, cpuwhich_t which,
 	if (policy <= DOMAINSET_POLICY_INVALID ||
 	    policy > DOMAINSET_POLICY_MAX)
 		return (EINVAL);
-	/* In Capability mode, you can only set your own CPU set. */
-	if (IN_CAPABILITY_MODE(td)) {
-		if (level != CPU_LEVEL_WHICH)
-			return (ECAPMODE);
-		if (which != CPU_WHICH_TID && which != CPU_WHICH_PID)
-			return (ECAPMODE);
-		if (id != -1)
-			return (ECAPMODE);
-	}
+	error = cpuset_check_capabilities(td, level, which, id);
+	if (error != 0)
+		return (error);
 	memset(&domain, 0, sizeof(domain));
 	mask = malloc(domainsetsize, M_TEMP, M_WAITOK | M_ZERO);
 	error = copyin(maskp, mask, domainsetsize);
@@ -2151,6 +2153,14 @@ kern_cpuset_setdomain(struct thread *td, cpulevel_t level, cpuwhich_t which,
 	DOMAINSET_COPY(mask, &domain.ds_mask);
 	domain.ds_policy = policy;
 
+	/*
+	 * Sanitize the provided mask.
+	 */
+	if (!DOMAINSET_SUBSET(&all_domains, &domain.ds_mask)) {
+		error = EINVAL;
+		goto out;
+	}
+
 	/* Translate preferred policy into a mask and fallback. */
 	if (policy == DOMAINSET_POLICY_PREFER) {
 		/* Only support a single preferred domain. */
@@ -2160,12 +2170,12 @@ kern_cpuset_setdomain(struct thread *td, cpulevel_t level, cpuwhich_t which,
 		}
 		domain.ds_prefer = DOMAINSET_FFS(&domain.ds_mask) - 1;
 		/* This will be constrained by domainset_shadow(). */
-		DOMAINSET_FILL(&domain.ds_mask);
+		DOMAINSET_COPY(&all_domains, &domain.ds_mask);
 	}
 
 	/*
-	 *  When given an impossible policy, fall back to interleaving
-	 *  across all domains
+	 * When given an impossible policy, fall back to interleaving
+	 * across all domains.
 	 */
 	if (domainset_empty_vm(&domain))
 		domainset_copy(&domainset2, &domain);
